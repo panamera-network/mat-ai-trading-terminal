@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react'
-import { IChartApi, ISeriesApi, LineData, Time } from 'lightweight-charts'
+import { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
 import { OHLCV } from '@/types'
-import { calculateVolumeProfile } from '@/utils/mockData'
+import { calculateVolumeProfile } from '@/utils/indicators'
 
 interface VolumeProfileIndicatorProps {
   chart: IChartApi
@@ -11,8 +11,8 @@ interface VolumeProfileIndicatorProps {
   bins?: number
 }
 
-export default function VolumeProfileIndicator({ 
-  chart, candleSeries, data, visible, bins = 50 
+export default function VolumeProfileIndicator({
+  chart, candleSeries, data, visible, bins = 50,
 }: VolumeProfileIndicatorProps) {
   const seriesRef = useRef<{
     pocSeries: any
@@ -21,7 +21,6 @@ export default function VolumeProfileIndicator({
   }>({ pocSeries: null, vahSeries: null, valSeries: null })
 
   useEffect(() => {
-    // Cleanup function
     const cleanup = () => {
       if (!chart) return
       if (seriesRef.current.pocSeries) {
@@ -43,15 +42,13 @@ export default function VolumeProfileIndicator({
       return cleanup
     }
 
-    // Check if chart is still valid (not disposed)
     try {
       chart.timeScale()
     } catch {
-      // Chart disposed
       return cleanup
     }
 
-    cleanup() // Remove old first
+    cleanup()
 
     const profile = calculateVolumeProfile(data, bins)
     if (!profile) return cleanup

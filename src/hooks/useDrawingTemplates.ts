@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
+import { nanoid } from 'nanoid'
 import { Drawing } from '@/types'
 
 const STORAGE_KEY = 'mat_drawing_templates'
@@ -24,7 +25,7 @@ export function useDrawingTemplates() {
 
   const saveTemplate = useCallback((name: string, symbol: string, timeframe: string, drawings: Drawing[]) => {
     const template: DrawingTemplate = {
-      id: `template-${Date.now()}`,
+      id: `template-${nanoid(8)}`,
       name,
       symbol,
       timeframe,

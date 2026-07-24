@@ -29,23 +29,40 @@ App.tsx
  └─ TradingTerminal.tsx
      ├─ LayoutSelector, BacktestControlBar/Setup/Results
      └─ MultiChartLayout.tsx
-         └─ ChartTile.tsx  (one per chart in the grid)
+         └─ ChartTile.tsx  (one per chart in the grid — everything below is per-tile)
+             ├─ LeftSidebar.tsx         (drawing tool palette, magnet/lock/delete, per-tile)
              ├─ DrawingOverlay.tsx      (SVG drawing tools, per-chart state)
              ├─ PositionLines.tsx       (SL/TP price lines + drag-to-modify)
              ├─ ChartContextMenu.tsx    (right-click → place order at price)
+             ├─ IndicatorOverlay.tsx    (SMA/EMA/Bollinger/VWAP, drawn directly on the price series)
+             ├─ IndicatorPanel.tsx      (RSI/MACD, own sub-chart stacked below the main pane)
+             ├─ VolumeProfileIndicator.tsx (POC/VAH/VAL lines)
+             ├─ IndicatorsModal.tsx     (picker — add/toggle/edit/remove indicators, opened via header "Indicators" button)
+             ├─ BottomPanel.tsx         (collapsible: Trades/Orders/Positions/Settings tabs)
              ├─ AlertsPanel / OrderPanel / DOMPanel / StrategyPanel
              ├─ PnLDashboard / TradeJournal / DrawingTemplateManager
-             └─ RiskCalculator / OrderConfirmModal  (inside OrderPanel)
+             └─ RiskCalculator / OrderConfirmModal / PositionActions (inside OrderPanel)
 ```
+
+There is no standalone `TopToolbar` component — `ChartTile`'s own header (symbol/
+timeframe/chart-type selects) already covers that job per-tile, so the toolbar's
+useful missing pieces (an indicators launcher, visible Undo/Redo) were added as
+buttons directly in that header instead of introducing a second, redundant
+control surface.
 
 State lives in `src/stores/` (zustand):
 - `layoutStore` — the source of truth for the chart grid. **Per-chart** state:
   each `ChartInstance` carries its own `drawings`, `indicators`, `data`,
-  `selectedDrawing`. Also owns the shared `magnetMode` toggle and drawing
-  undo/redo command stacks (keyed by chart id).
+  `selectedDrawing`, `showVolume`, `showGrid`. Also owns the shared `magnetMode`
+  toggle and drawing undo/redo command stacks (keyed by chart id). Indicator
+  actions: `addIndicator`/`removeIndicator`/`toggleIndicator`/`updateIndicatorParams`.
 - `orderStore` — orders/positions/trades, backed by `services/orderService.ts`
   (an in-memory simulated fill/matching engine — not a real broker).
 - `alertsStore`, `backtestStore`, `strategyStore` — as named.
+
+Indicator math lives in `src/utils/indicators.ts` (SMA/EMA/RSI/MACD/Bollinger/
+VWAP/ATR/Volume Profile) — pure functions over `OHLCV[]`, no store coupling, so
+they work identically on live or backtest data.
 
 Types are unified in `src/types/` — **`Symbol`, `ChartType`, `Timeframe` are
 canonically defined in `src/types/market.ts`** and re-exported through
@@ -69,14 +86,9 @@ socket protocol; there is currently no multi-account support.
 
 ## `archive/`
 
-Two folders of dead/superseded code, kept for reference rather than deleted
-outright, each with its own `README.md` explaining what's in it and why it's not
-live:
+One folder of dead/superseded code kept for reference rather than deleted
+outright, with its own `README.md` explaining what's in it and why it's not live:
 
-- `archive/legacy-single-chart-ui/` — an earlier single-global-chart prototype
-  (`ChartContainer`, a `Sidebar`, a `TopToolbar` with an indicators modal, panel-
-  style indicators) that depended on a `chartStore` which no longer exists. Fully
-  superseded by the multi-chart `ChartTile`/`layoutStore` architecture above.
 - `archive/mt5-bridge-frontend-prototype/` — a standalone package that was never
   wired into `src/`, built against a different (deleted) ZeroMQ↔WebSocket bridge.
   The useful, self-contained pieces (risk calculator, order confirm modal, P&L
@@ -143,18 +155,51 @@ in a browser: chart renders, live feed connects, drawing tools work, all panel
 toggles (Alerts/Strategy/DOM/Order/P&L/Journal/Templates) open without errors,
 and `npm run dev` starts both the bridge and Vite without crashing.
 
+## 2026-07-25 (continued) — indicators, Volume Profile, and the rest of the legacy UI rebuilt
+
+The user then asked to rebuild `BottomPanel`, `LeftSidebar`, `TopToolbar`,
+`IndicatorsModal` + indicator rendering (including Volume Profile) from
+`archive/legacy-single-chart-ui/`, wired to real data instead of the old
+`chartStore`. Done — see the architecture diagram above. Specifics:
+
+- `layoutStore` gained per-chart `indicators` CRUD + `showVolume`/`showGrid`
+  fields (`ChartInstance` type extended accordingly).
+- `IndicatorOverlay.tsx`/`IndicatorPanel.tsx`/`VolumeProfileIndicator.tsx` ported
+  from the archive near-verbatim — they already took `data`/`indicators` as
+  props rather than reading a global store, so they needed no architectural
+  change, just real `chart.data`/`chart.indicators` wiring. `calculateVolumeProfile`
+  was moved from `utils/mockData.ts` to `utils/indicators.ts` (it's a real
+  calculation over `OHLCV[]`, not mock-data-specific — it never belonged there).
+- `ChartTile.tsx` now renders an actual volume histogram (previously nothing —
+  the app had **no volume bars at all**), toggle-able via `chart.showVolume`;
+  grid lines are toggle-able via `chart.showGrid`; Undo/Redo are now visible
+  header buttons wired to `layoutStore`'s existing (previously keyboard-only)
+  `undoDrawing`/`redoDrawing`.
+- `IndicatorsModal.tsx` rebuilt against `layoutStore`'s per-chart indicator
+  actions. **Found and fixed a real bug while testing**: indicator IDs were
+  generated as `` `ind-${Date.now()}` ``, which collides when two indicators are
+  added within the same millisecond (trivially reproducible by clicking two
+  preset buttons in quick succession) — React then renders duplicate keys and
+  silently drops one. Switched to `nanoid()`. The same collision-prone pattern
+  existed in `DrawingOverlay.tsx`'s drawing IDs and `useDrawingTemplates.ts`'s
+  template IDs (both used as React list keys) — fixed those too.
+- `LeftSidebar.tsx` rebuilt as a **per-tile** component (the original was global,
+  for the old single-chart layout) — operates on that `ChartTile`'s own
+  `activeTool` state and `layoutStore`'s per-chart drawings.
+- `BottomPanel.tsx` rebuilt with real data throughout: Trades/Orders/Positions
+  tabs read from `useOrderStore()` filtered by the tile's symbol; the Settings
+  tab's Chart Type/Show Volume/Show Grid/Magnet Mode controls are wired to the
+  same `layoutStore` state the header and chart itself use (not separate,
+  disconnected local checkboxes like the archived version had).
+
+Verified in-browser: added SMA/RSI/Volume Profile indicators (all three render,
+including the previously-nonexistent RSI sub-panel), toggled Show Volume/Show
+Grid live, exercised the sidebar's tool selection and magnet toggle, confirmed
+`npx tsc --noEmit` and `npm run build` stay clean.
+
 ## Known gaps (deliberately not fixed/built in this pass)
 
 - **No multi-account support.** The bridge and EA are single-account only.
-- **No Volume Profile rendering** in the live chart, even though the indicators
-  menu (`src/utils/mockData.ts`'s `calculateVolumeProfile`, referenced from
-  `Toolbar/IndicatorsModal` in the archived tree) implies one exists. The
-  archived `VolumeProfileIndicator.tsx`/`VolumeProfileOverlay.tsx` are a
-  reasonable starting point if this is wanted — see
-  `archive/legacy-single-chart-ui/README.md`.
-- **No UI to add chart indicators at all** — `ChartTile.tsx` can render
-  indicators (`addIndicator` callback) but nothing in the live tree calls it from
-  a picker UI. The archived `IndicatorsModal.tsx` is a reference for the UX.
 - **Trade analytics are intentionally limited.** `PnLDashboard`/`TradeJournal`
   only show unrealized P&L, commission, and SL/TP hit counts — not win-rate or
   profit-factor — because `Trade` (`src/types/order.ts`) doesn't carry a

@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import { LayoutConfig, ChartInstance, CandleData, Symbol, Timeframe, ChartType, ALL_SYMBOLS, Drawing } from '@/types'
+import { LayoutConfig, ChartInstance, CandleData, Symbol, Timeframe, ChartType, ALL_SYMBOLS, Drawing, Indicator } from '@/types'
 import { nanoid } from 'nanoid'
 
 // Drawing command for undo/redo
@@ -42,6 +42,14 @@ interface LayoutStore {
   redoDrawing: (chartId: string) => void
   canUndoDrawing: (chartId: string) => boolean
   canRedoDrawing: (chartId: string) => boolean
+
+  // Indicator actions
+  addIndicator: (chartId: string, indicator: Indicator) => void
+  removeIndicator: (chartId: string, indicatorId: string) => void
+  toggleIndicator: (chartId: string, indicatorId: string) => void
+  updateIndicatorParams: (chartId: string, indicatorId: string, params: Record<string, number | boolean | string>) => void
+  toggleShowVolume: (chartId: string) => void
+  toggleShowGrid: (chartId: string) => void
 
   // Sync toggles
   toggleSyncCrosshair: () => void
@@ -404,6 +412,76 @@ export const useLayoutStore = create<LayoutStore>((set, get) => ({
     return stack ? stack.redo.length > 0 : false
   },
 
+  addIndicator: (chartId, indicator) => {
+    set((state) => ({
+      layout: {
+        ...state.layout,
+        charts: state.layout.charts.map((c) =>
+          c.id === chartId ? { ...c, indicators: [...c.indicators, indicator] } : c
+        ),
+      },
+    }))
+  },
+
+  removeIndicator: (chartId, indicatorId) => {
+    set((state) => ({
+      layout: {
+        ...state.layout,
+        charts: state.layout.charts.map((c) =>
+          c.id === chartId ? { ...c, indicators: c.indicators.filter((i) => i.id !== indicatorId) } : c
+        ),
+      },
+    }))
+  },
+
+  toggleIndicator: (chartId, indicatorId) => {
+    set((state) => ({
+      layout: {
+        ...state.layout,
+        charts: state.layout.charts.map((c) =>
+          c.id === chartId
+            ? { ...c, indicators: c.indicators.map((i) => (i.id === indicatorId ? { ...i, visible: !i.visible } : i)) }
+            : c
+        ),
+      },
+    }))
+  },
+
+  updateIndicatorParams: (chartId, indicatorId, params) => {
+    set((state) => ({
+      layout: {
+        ...state.layout,
+        charts: state.layout.charts.map((c) =>
+          c.id === chartId
+            ? { ...c, indicators: c.indicators.map((i) => (i.id === indicatorId ? { ...i, params } : i)) }
+            : c
+        ),
+      },
+    }))
+  },
+
+  toggleShowVolume: (chartId) => {
+    set((state) => ({
+      layout: {
+        ...state.layout,
+        charts: state.layout.charts.map((c) =>
+          c.id === chartId ? { ...c, showVolume: !c.showVolume } : c
+        ),
+      },
+    }))
+  },
+
+  toggleShowGrid: (chartId) => {
+    set((state) => ({
+      layout: {
+        ...state.layout,
+        charts: state.layout.charts.map((c) =>
+          c.id === chartId ? { ...c, showGrid: !c.showGrid } : c
+        ),
+      },
+    }))
+  },
+
   toggleSyncCrosshair: () => {
     set((state) => ({
       layout: { ...state.layout, syncCrosshair: !state.layout.syncCrosshair },
@@ -451,5 +529,7 @@ function createDefaultChart(
     dailyChange: null,
     dailyChangePercent: null,
     selectedDrawing: null,
+    showVolume: true,
+    showGrid: true,
   }
 }

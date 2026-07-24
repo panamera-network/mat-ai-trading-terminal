@@ -1,7 +1,11 @@
 import { useEffect, useRef } from 'react'
-import { IChartApi, ISeriesApi, LineData, Time } from 'lightweight-charts'
+import { IChartApi, ISeriesApi, LineData, LineWidth, Time } from 'lightweight-charts'
 import { OHLCV, Indicator } from '@/types'
 import { calculateSMA, calculateEMA, calculateBollinger, calculateVWAP } from '@/utils/indicators'
+
+function toLineWidth(width: number | undefined, fallback: LineWidth): LineWidth {
+  return (width ?? fallback) as unknown as LineWidth
+}
 
 interface IndicatorOverlayProps {
   chart: IChartApi
@@ -28,18 +32,17 @@ export default function IndicatorOverlay({ chart, candleSeries, data, indicators
       return cleanup
     }
 
-    // Check chart valid
     try { chart.timeScale() } catch { return cleanup }
 
-    const visibleIndicators = indicators.filter(i => i.visible)
-    const indicatorsKey = visibleIndicators.map(i => `${i.id}-${i.name}-${JSON.stringify(i.params)}`).join('|')
+    const visibleIndicators = indicators.filter((i) => i.visible)
+    const indicatorsKey = visibleIndicators.map((i) => `${i.id}-${i.name}-${JSON.stringify(i.params)}`).join('|')
 
     if (prevKeyRef.current === indicatorsKey) return cleanup
     prevKeyRef.current = indicatorsKey
 
     cleanup()
 
-    const closes = data.map(d => d.close)
+    const closes = data.map((d) => d.close)
 
     for (const indicator of visibleIndicators) {
       const params = indicator.params
@@ -57,7 +60,7 @@ export default function IndicatorOverlay({ chart, candleSeries, data, indicators
             }
             const lineSeries = chart.addLineSeries({
               color: (params.color as string) || '#2962FF',
-              lineWidth: (params.width as number) || 2,
+              lineWidth: toLineWidth(params.width as number, 2),
               title: `SMA ${period}`,
               priceScaleId: 'right',
             })
@@ -77,7 +80,7 @@ export default function IndicatorOverlay({ chart, candleSeries, data, indicators
             }
             const lineSeries = chart.addLineSeries({
               color: (params.color as string) || '#fb8c00',
-              lineWidth: (params.width as number) || 2,
+              lineWidth: toLineWidth(params.width as number, 2),
               title: `EMA ${period}`,
               priceScaleId: 'right',
             })
@@ -104,7 +107,7 @@ export default function IndicatorOverlay({ chart, candleSeries, data, indicators
               }
               const lineSeries = chart.addLineSeries({
                 color: config.color,
-                lineWidth: config.width,
+                lineWidth: toLineWidth(config.width, 1),
                 lineStyle: config.style,
                 title: config.title,
                 priceScaleId: 'right',
@@ -126,7 +129,7 @@ export default function IndicatorOverlay({ chart, candleSeries, data, indicators
             }
             const lineSeries = chart.addLineSeries({
               color: (params.color as string) || '#fdd835',
-              lineWidth: (params.width as number) || 2,
+              lineWidth: toLineWidth(params.width as number, 2),
               title: 'VWAP',
               priceScaleId: 'right',
             })

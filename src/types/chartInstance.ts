@@ -13,6 +13,8 @@ export interface ChartInstance {
   dailyChange: number | null
   dailyChangePercent: number | null
   selectedDrawing?: string | null  // Tambah untuk drawing selection
+  showVolume: boolean
+  showGrid: boolean
 }
 
 export interface CandleData {

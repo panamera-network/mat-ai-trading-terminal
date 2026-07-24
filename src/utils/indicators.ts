@@ -181,3 +181,71 @@ export function calculateATR(data: OHLCV[], period: number = 14): (number | null
 
   return calculateSMA(tr, period)
 }
+
+// Volume Profile: distributes each candle's volume across price bins it spans,
+// returns the point of control (POC) and the 70% value area (VAH/VAL).
+export interface VolumeProfileResult {
+  priceLevels: number[]
+  volumes: number[]
+  poc: number
+  vah: number
+  val: number
+  totalVolume: number
+  maxVolume: number
+}
+
+export function calculateVolumeProfile(data: OHLCV[], bins: number = 50): VolumeProfileResult | null {
+  if (data.length === 0) return null
+
+  const priceMin = Math.min(...data.map(d => d.low))
+  const priceMax = Math.max(...data.map(d => d.high))
+  const binSize = (priceMax - priceMin) / bins
+
+  const volumes = new Array(bins).fill(0)
+  const priceLevels: number[] = []
+
+  for (let i = 0; i < bins; i++) {
+    priceLevels.push(priceMin + i * binSize)
+  }
+
+  for (const candle of data) {
+    const lowBin = Math.max(0, Math.floor((candle.low - priceMin) / binSize))
+    const highBin = Math.min(bins - 1, Math.floor((candle.high - priceMin) / binSize))
+    const binsCovered = Math.max(1, highBin - lowBin + 1)
+    const volPerBin = candle.volume / binsCovered
+
+    for (let b = lowBin; b <= highBin; b++) {
+      volumes[b] += volPerBin
+    }
+  }
+
+  const maxVolIndex = volumes.indexOf(Math.max(...volumes))
+  const poc = priceLevels[maxVolIndex]
+
+  const totalVol = volumes.reduce((a, b) => a + b, 0)
+  const targetVol = totalVol * 0.7
+
+  const indexed = volumes.map((v, i) => ({ vol: v, idx: i, dist: Math.abs(i - maxVolIndex) }))
+  indexed.sort((a, b) => a.dist - b.dist)
+
+  let cumVol = 0
+  const vaIndices: number[] = []
+  for (const item of indexed) {
+    cumVol += item.vol
+    vaIndices.push(item.idx)
+    if (cumVol >= targetVol) break
+  }
+
+  const vah = priceLevels[Math.max(...vaIndices)]
+  const val = priceLevels[Math.min(...vaIndices)]
+
+  return {
+    priceLevels,
+    volumes,
+    poc,
+    vah,
+    val,
+    totalVolume: totalVol,
+    maxVolume: Math.max(...volumes),
+  }
+}

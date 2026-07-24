@@ -1,5 +1,6 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
 import { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
+import { nanoid } from 'nanoid'
 import { DrawingType, Drawing, DrawingPoint } from '@/types'
 import { useLayoutStore } from '@/stores/layoutStore'
 
@@ -209,7 +210,7 @@ export default function DrawingOverlay({ chartId, chart, candleSeries, activeToo
     const singleClickTools: DrawingType[] = ['horizontal', 'vertical', 'text']
     if (singleClickTools.includes(activeTool) && tempPoints.length >= 1) {
       const newDrawing: Drawing = {
-        id: `drawing-${Date.now()}`,
+        id: `drawing-${nanoid(8)}`,
         type: activeTool,
         points: [tempPoints[0]],
         color: '#2962FF',
@@ -232,7 +233,7 @@ export default function DrawingOverlay({ chartId, chart, candleSeries, activeToo
     }
 
     const newDrawing: Drawing = {
-      id: `drawing-${Date.now()}`,
+      id: `drawing-${nanoid(8)}`,
       type: activeTool,
       points: tempPoints,
       color: activeTool === 'horizontal' || activeTool === 'vertical' ? '#2962FF' : '#fff',
