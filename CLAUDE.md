@@ -41,6 +41,7 @@ App.tsx
              ├─ BottomPanel.tsx         (collapsible: Trades/Orders/Positions/Settings tabs)
              ├─ AlertsPanel / OrderPanel / DOMPanel / StrategyPanel
              ├─ PnLDashboard / TradeJournal / DrawingTemplateManager
+             ├─ MultiTimeframePanel.tsx (mini-charts for other timeframes, same symbol)
              └─ RiskCalculator / OrderConfirmModal / PositionActions (inside OrderPanel)
 ```
 
@@ -197,6 +198,66 @@ including the previously-nonexistent RSI sub-panel), toggled Show Volume/Show
 Grid live, exercised the sidebar's tool selection and magnet toggle, confirmed
 `npx tsc --noEmit` and `npm run build` stay clean.
 
+## 2026-07-25 (continued again) — SL/TP drag now has a live visual handle
+
+`PositionLines.tsx`'s SL/TP drag used to update the position silently — you only
+saw the new price on mouseup, no handle or label followed the cursor. Added
+that directly to `PositionLines.tsx` (a `drag` state set alongside the existing
+`modifySLTP` calls in the same mousemove handler — no new event-handling logic,
+just visual feedback for logic that was already firing): a colored line +
+handle + a label showing live price and pip distance from entry
+(`Math.abs(price - entryPrice) / symbol.pipSize`), positioned via
+`series.priceToCoordinate`/`coordinateToPrice` (the same real lightweight-charts
+API used elsewhere in this codebase — not the archived `chart-helpers.ts`'s
+manual price-scale math, which was for a different, non-lightweight-charts
+chart implementation and was never needed here).
+
+Verified end-to-end in-browser: opened a position, dragged the TP line, watched
+the label update live across two mouse-move steps (e.g. "TP 1.08708 (30.3 pips)"
+→ "TP 1.08770 (36.5 pips)"), released, confirmed the overlay disappeared and the
+position's TP in the store matched the drop price exactly. (Testing this against
+the live mock feed was fiddly — price moves fast enough that a position placed
+with a narrow SL/TP can hit and close within seconds, so the test does
+everything — place order, set SL/TP, drag — in one uninterrupted script.)
+
+## 2026-07-25 (continued once more) — fixed a real multi-chart bug, then built MultiTimeframePanel
+
+Building `MultiTimeframePanel` (glance mini-charts for other timeframes of the
+same symbol) surfaced a bug that predates this session: `mt5Feed`/`binanceFeed`
+(`src/services/mt5Feed.ts`, `binanceFeed.ts`) were module-level singletons with
+exactly **one active connection**. `connect()` tore down whatever was already
+streaming before starting the new one. Verified concretely: opening a second
+chart tile on GBP/USD while a EUR/USD tile was open made **both tiles display
+GBP/USD's price** — the EUR/USD tile silently froze. Any multi-chart layout with
+more than one live MT5 (or Binance) symbol was affected, not just this new panel.
+
+Fixed by converting `mt5Feed.ts`, `binanceFeed.ts`, and `depthFeed.ts` from
+single-connection classes into subscription managers: `connect()` now returns a
+unique id, stored in a `Map`, and `disconnect(id)`/`getCurrentPrices(id)`/
+`getConnectionStatus(id)` all act on that one subscription only. Updated
+`useRealtimeFeed.ts` and `useDepthData.ts` to capture and use the returned id
+instead of calling the old no-argument singleton API. Verified in-browser: two
+tiles (EUR/USD, GBP/USD) now show correct, independently-updating prices, and
+removing a tile cleans up without affecting the other.
+
+This also meant `MultiTimeframePanel`'s own secondary-timeframe subscriptions
+(4 extra `mt5Feed` connections per chart tile, one per glance timeframe) would
+otherwise each run their own random walk against `orderService`'s position/
+pending-order checks — 5 subscriptions for one symbol fighting over the same
+position's P&L. Added a `driveOrders` option to `mt5Feed.connect()` (default
+`true`); only the chart tile actually trading a symbol passes `true` (implicitly,
+by omitting it), while `MultiTimeframePanel` and `useDepthData`'s depth-only
+subscription pass `driveOrders: false`.
+
+`MultiTimeframePanel.tsx` itself seeds each mini-chart via `dataLoader.ts`'s
+`generateMockData`, with the `days` parameter scaled per timeframe
+(`BAR_DAYS` — targets ~30 bars for every timeframe) rather than a fixed value —
+the feed's candle bucketing is tied to real wall-clock time, so a 1D/1W
+subscription started from empty would show almost no history within a normal
+session. Live ticks from the (now-independent) feed subscription append onto
+that seeded history as they arrive. Wired into `ChartTile.tsx` as a toggleable
+"MTF" header button, same pattern as Alerts/Strategy/DOM/etc.
+
 ## Known gaps (deliberately not fixed/built in this pass)
 
 - **No multi-account support.** The bridge and EA are single-account only.
@@ -207,9 +268,6 @@ Grid live, exercised the sidebar's tool selection and magnet toggle, confirmed
   `OrderService.closePosition`/`updatePosition`
   (`src/services/orderService.ts`), not just a UI port. See
   `archive/mt5-bridge-frontend-prototype/README.md` for the detail.
-- **`PositionLines.tsx`'s SL/TP drag has no visual handle** while dragging (you
-  only see the result on mouseup). The archived `SLTPDragOverlay.tsx` is a nicer
-  reference implementation if this gets revisited.
 - **`accountBalance` is hardcoded to `10000`** in `RiskCalculator`'s caller and
   `useStrategyRunner.ts` (both marked `// TODO`) — there's no live account/equity
   feed feeding a real balance yet.

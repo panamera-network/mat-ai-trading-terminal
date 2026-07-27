@@ -13,17 +13,19 @@ export function useDepthData(symbol: Symbol) {
 
   useEffect(() => {
     if (symbol.exchange === 'binance') {
-      depthFeed.connect(symbol, {
+      const id = depthFeed.connect(symbol, {
         onSnapshot: handleDepth,
       })
-      return () => depthFeed.disconnect()
+      return () => depthFeed.disconnect(id)
     } else {
-      // MT5 depth comes through the main feed
-      mt5Feed.connect(symbol, '1m', {
+      // MT5 depth comes through its own subscription — driveOrders: false since
+      // the chart tile's own feed subscription already owns that for this symbol.
+      const id = mt5Feed.connect(symbol, '1m', {
         onCandle: () => {},
         onDepth: handleDepth,
+        driveOrders: false,
       })
-      return () => mt5Feed.disconnect()
+      return () => mt5Feed.disconnect(id)
     }
   }, [symbol.id, symbol.exchange, handleDepth])
 

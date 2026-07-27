@@ -1,101 +1,121 @@
 import { CandleData, DepthSnapshot } from '@/types'
-import { Symbol, FOREX_PAIRS } from '@/types/market'
+import { Symbol } from '@/types/market'
 import { orderService } from '@/services/orderService'
 
-// Mock MT5 forex feed — simulates realistic forex price action with spread
+interface MT5Subscription {
+  symbol: Symbol
+  timeframe: string
+  currentPrice: number
+  currentBid: number
+  currentAsk: number
+  currentSpread: number
+  currentCandle: CandleData | null
+  onCandle: ((data: CandleData) => void) | null
+  onDepth: ((data: DepthSnapshot) => void) | null
+  interval: ReturnType<typeof setInterval> | null
+  tickCount: number
+  isRunning: boolean
+  driveOrders: boolean
+}
+
+// Mock MT5 forex feed — simulates realistic forex price action with spread.
+// Each connect() call gets its own independent subscription (own ticker interval,
+// own price state) so multiple chart tiles can track different symbols/timeframes
+// at once instead of fighting over one shared connection.
 export class MT5Feed {
-  private interval: ReturnType<typeof setInterval> | null = null
-  private symbol: Symbol | null = null
-  private currentPrice = 0
-  private currentBid = 0
-  private currentAsk = 0
-  private currentSpread = 0
-  private currentCandle: CandleData | null = null
-  private onCandle: ((data: CandleData) => void) | null = null
-  private onDepth: ((data: DepthSnapshot) => void) | null = null
-  private onConnect: (() => void) | null = null
-  private tickCount = 0
-  private isRunning = false
+  private subscriptions = new Map<string, MT5Subscription>()
 
   connect(symbol: Symbol, timeframe: string, callbacks: {
     onCandle: (data: CandleData) => void
     onDepth?: (data: DepthSnapshot) => void
     onError?: (err: Error) => void
     onConnect?: () => void
-  }) {
-    this.symbol = symbol
-    this.onCandle = callbacks.onCandle
-    this.onDepth = callbacks.onDepth || null
-    this.onConnect = callbacks.onConnect || null
+    // Whether this subscription's simulated ticks should drive orderService's
+    // position/pending-order checks. Only one subscription per symbol should
+    // do this (the chart tile actually trading it) — secondary subscriptions
+    // (multi-timeframe glances, depth-only feeds) run their own independent
+    // random walk and would otherwise fight over the same position's P&L.
+    driveOrders?: boolean
+  }): string {
+    const id = `${symbol.id}_${timeframe}_${Math.random().toString(36).slice(2, 9)}`
 
-    // Seed realistic starting price
     const seedPrices: Record<string, number> = {
       'EURUSD': 1.08542, 'GBPUSD': 1.27415, 'USDJPY': 157.832,
       'AUDUSD': 0.66892, 'USDCAD': 1.36450, 'XAUUSD': 2435.80,
     }
-    this.currentPrice = seedPrices[symbol.id] || 1.0
-    this.currentSpread = this.getSpread(symbol.id)
-    this.currentBid = this.currentPrice - this.currentSpread / 2
-    this.currentAsk = this.currentPrice + this.currentSpread / 2
+    const currentPrice = seedPrices[symbol.id] || 1.0
+    const currentSpread = this.getSpread(symbol.id)
+    const currentBid = currentPrice - currentSpread / 2
+    const currentAsk = currentPrice + currentSpread / 2
 
-    // Seed initial candle (using mid price)
     const now = Math.floor(Date.now() / 1000)
     const tfSeconds = this.timeframeToSeconds(timeframe)
     const candleTime = Math.floor(now / tfSeconds) * tfSeconds
 
-    this.currentCandle = {
-      time: candleTime,
-      open: this.currentPrice,
-      high: this.currentPrice,
-      low: this.currentPrice - this.currentSpread,
-      close: this.currentPrice,
-      volume: 0,
+    const sub: MT5Subscription = {
+      symbol,
+      timeframe,
+      currentPrice,
+      currentBid,
+      currentAsk,
+      currentSpread,
+      currentCandle: {
+        time: candleTime,
+        open: currentPrice,
+        high: currentPrice,
+        low: currentPrice - currentSpread,
+        close: currentPrice,
+        volume: 0,
+      },
+      onCandle: callbacks.onCandle,
+      onDepth: callbacks.onDepth || null,
+      interval: null,
+      tickCount: 0,
+      isRunning: true,
+      driveOrders: callbacks.driveOrders ?? true,
     }
 
-    this.isRunning = true
-    this.onConnect?.()
+    this.subscriptions.set(id, sub)
+    callbacks.onConnect?.()
 
-    // Simulate ticks every 200-500ms
-    this.interval = setInterval(() => {
-      this.simulateTick(timeframe)
+    sub.interval = setInterval(() => {
+      this.simulateTick(id)
     }, 200 + Math.random() * 300)
+
+    return id
   }
 
-  private simulateTick(timeframe: string) {
-    if (!this.symbol || !this.currentCandle) return
+  private simulateTick(id: string) {
+    const sub = this.subscriptions.get(id)
+    if (!sub || !sub.currentCandle) return
 
-    const symbol = this.symbol
+    const { symbol, timeframe } = sub
     const spread = this.getSpread(symbol.id)
     const volatility = this.getVolatility(symbol.id)
 
-    // Random walk with slight trend bias
-    const trend = Math.sin(this.tickCount / 100) * volatility * 0.3
+    const trend = Math.sin(sub.tickCount / 100) * volatility * 0.3
     const noise = (Math.random() - 0.5) * volatility
-    const newMid = this.currentPrice + trend + noise
+    const newMid = sub.currentPrice + trend + noise
 
-    // Variable spread (wider during volatile times)
     const spreadMultiplier = 1 + Math.abs(noise) / volatility * 0.5
     const currentSpread = spread * spreadMultiplier
 
     const bid = newMid - currentSpread / 2
     const ask = newMid + currentSpread / 2
 
-    this.currentPrice = newMid
-    this.currentBid = bid
-    this.currentAsk = ask
-    this.currentSpread = currentSpread
+    sub.currentPrice = newMid
+    sub.currentBid = bid
+    sub.currentAsk = ask
+    sub.currentSpread = currentSpread
 
     const tfSeconds = this.timeframeToSeconds(timeframe)
     const now = Math.floor(Date.now() / 1000)
     const candleTime = Math.floor(now / tfSeconds) * tfSeconds
 
-    // New candle or update current
-    if (candleTime > this.currentCandle.time) {
-      // Emit completed candle
-      this.onCandle?.({ ...this.currentCandle })
+    if (candleTime > sub.currentCandle.time) {
+      sub.onCandle?.({ ...sub.currentCandle })
 
-      // Start new candle
-      this.currentCandle = {
+      sub.currentCandle = {
         time: candleTime,
         open: newMid,
         high: newMid,
@@ -104,25 +124,23 @@ export class MT5Feed {
         volume: Math.random() * 100 + 10,
       }
     } else {
-      // Update current candle (mid price)
-      this.currentCandle.high = Math.max(this.currentCandle.high, newMid)
-      this.currentCandle.low = Math.min(this.currentCandle.low, newMid)
-      this.currentCandle.close = newMid
-      this.currentCandle.volume += Math.random() * 5
+      sub.currentCandle.high = Math.max(sub.currentCandle.high, newMid)
+      sub.currentCandle.low = Math.min(sub.currentCandle.low, newMid)
+      sub.currentCandle.close = newMid
+      sub.currentCandle.volume += Math.random() * 5
 
-      // Emit updated candle
-      this.onCandle?.({ ...this.currentCandle })
+      sub.onCandle?.({ ...sub.currentCandle })
     }
 
-    this.tickCount++
+    sub.tickCount++
 
-    // Check pending orders on every tick (spread-aware)
-    orderService.checkPendingOrders(symbol, bid, ask, currentSpread)
-    orderService.updatePositions(symbol, bid, ask)
+    if (sub.driveOrders) {
+      orderService.checkPendingOrders(symbol, bid, ask, currentSpread)
+      orderService.updatePositions(symbol, bid, ask)
+    }
 
-    // Emit depth every 5 ticks
-    if (this.tickCount % 5 === 0 && this.onDepth) {
-      this.onDepth(this.generateDepth(symbol.id, bid, ask, currentSpread))
+    if (sub.tickCount % 5 === 0 && sub.onDepth) {
+      sub.onDepth(this.generateDepth(symbol.id, bid, ask, currentSpread))
     }
   }
 
@@ -141,7 +159,6 @@ export class MT5Feed {
       asks.push({ price: askPrice, size: askSize, cumulativeSize: 0, isBid: false })
     }
 
-    // Calculate cumulative
     let cumBid = 0
     for (const b of bids) { cumBid += b.size; b.cumulativeSize = cumBid }
     let cumAsk = 0
@@ -152,7 +169,7 @@ export class MT5Feed {
       bids,
       asks,
       lastPrice: (bid + ask) / 2,
-      lastUpdateId: this.tickCount,
+      lastUpdateId: Date.now(),
     }
   }
 
@@ -180,24 +197,25 @@ export class MT5Feed {
     return map[tf] || 3600
   }
 
-  disconnect() {
-    this.isRunning = false
-    if (this.interval) {
-      clearInterval(this.interval)
-      this.interval = null
-    }
+  disconnect(id: string) {
+    const sub = this.subscriptions.get(id)
+    if (!sub) return
+    if (sub.interval) clearInterval(sub.interval)
+    this.subscriptions.delete(id)
   }
 
-  getConnectionStatus() {
-    return this.isRunning
+  getConnectionStatus(id: string) {
+    return this.subscriptions.get(id)?.isRunning ?? false
   }
 
-  getCurrentPrices() {
+  getCurrentPrices(id: string) {
+    const sub = this.subscriptions.get(id)
+    if (!sub) return { bid: 0, ask: 0, mid: 0, spread: 0 }
     return {
-      bid: this.currentBid,
-      ask: this.currentAsk,
-      mid: this.currentPrice,
-      spread: this.currentSpread,
+      bid: sub.currentBid,
+      ask: sub.currentAsk,
+      mid: sub.currentPrice,
+      spread: sub.currentSpread,
     }
   }
 }

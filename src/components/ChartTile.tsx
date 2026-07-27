@@ -20,6 +20,7 @@ import AlertsPanel from './AlertsPanel'
 import PnLDashboard from './PnLDashboard'
 import TradeJournal from './TradeJournal'
 import DrawingTemplateManager from './DrawingTemplateManager'
+import MultiTimeframePanel from './MultiTimeframePanel'
 import KeyboardHelpModal from './KeyboardHelpModal'
 import LeftSidebar from './LeftSidebar'
 import IndicatorsModal from './IndicatorsModal'
@@ -47,6 +48,7 @@ export default function ChartTile({ chartId, isActive }: ChartTileProps) {
   const [showPnL, setShowPnL] = useState(false)
   const [showJournal, setShowJournal] = useState(false)
   const [showTemplates, setShowTemplates] = useState(false)
+  const [showMTF, setShowMTF] = useState(false)
   const [showIndicatorsModal, setShowIndicatorsModal] = useState(false)
 
   const chart = useLayoutStore((s) => s.layout.charts.find((c) => c.id === chartId)!)
@@ -319,6 +321,7 @@ export default function ChartTile({ chartId, isActive }: ChartTileProps) {
           <button onClick={() => setShowPnL(!showPnL)} className={`text-[10px] px-1.5 py-0.5 rounded border ${showPnL ? 'bg-blue-900 border-blue-500 text-blue-300' : 'border-gray-700 text-gray-500'}`}>P&amp;L</button>
           <button onClick={() => setShowJournal(!showJournal)} className={`text-[10px] px-1.5 py-0.5 rounded border ${showJournal ? 'bg-blue-900 border-blue-500 text-blue-300' : 'border-gray-700 text-gray-500'}`}>Journal</button>
           <button onClick={() => setShowTemplates(!showTemplates)} className={`text-[10px] px-1.5 py-0.5 rounded border ${showTemplates ? 'bg-blue-900 border-blue-500 text-blue-300' : 'border-gray-700 text-gray-500'}`}>Templates</button>
+          <button onClick={() => setShowMTF(!showMTF)} className={`text-[10px] px-1.5 py-0.5 rounded border ${showMTF ? 'bg-blue-900 border-blue-500 text-blue-300' : 'border-gray-700 text-gray-500'}`}>MTF</button>
           {!isBacktestMode && <button onClick={() => removeChart(chartId)} className="text-gray-500 hover:text-red-400 text-xs px-1">×</button>}
         </div>
       </div>
@@ -385,6 +388,7 @@ export default function ChartTile({ chartId, isActive }: ChartTileProps) {
             onApplyDrawings={(drawings) => updateChart(chartId, { drawings })}
           />
         )}
+        {showMTF && <MultiTimeframePanel symbol={chart.symbol} primaryTimeframe={chart.timeframe} />}
       </div>
 
       <KeyboardHelpModal isOpen={showHelp} onClose={() => setShowHelp(false)} />

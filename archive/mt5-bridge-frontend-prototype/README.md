@@ -43,29 +43,48 @@ today (unrealized P&L, commission paid, SL/TP hit counts, raw trade log).
 Revisit `getDefaultSpread`/`closePosition` in `orderService.ts` if you want to add
 `profit` and unlock full analytics.
 
+**Since resolved:** `components/SLTPDragOverlay.tsx`'s UX idea (live handle +
+label showing price/pip distance while dragging SL/TP) was implemented directly
+in `src/components/PositionLines.tsx` (2026-07-25) — as a `drag` state addition
+alongside the mousemove handler that was already calling `modifySLTP`, using the
+real `series.priceToCoordinate`/`coordinateToPrice` API, not this package's
+`chart-helpers.ts` (which did manual price-scale math for a different,
+non-lightweight-charts chart implementation and was never applicable here).
+Verified end-to-end with a live drag in the browser. `SLTPDragOverlay.tsx` and
+`chart-helpers.ts` were deleted from here afterward — nothing in them ended up
+used, since the real API made the manual coordinate math unnecessary.
+
+**Since resolved:** `components/MultiTimeframePanel.tsx` — rebuilt in
+`src/components/MultiTimeframePanel.tsx` (2026-07-25). This uncovered a real bug
+in the process: `mt5Feed`/`binanceFeed` (`src/services/`) were module-level
+singletons with exactly one active connection — connecting a second
+symbol/timeframe tore down whatever was already streaming. In a multi-chart
+layout, opening a second tile on a different symbol silently froze the first
+tile and made both tiles display the second symbol's price. Fixed by refactoring
+`mt5Feed.ts`, `binanceFeed.ts`, and `depthFeed.ts` into proper subscription
+managers (`connect()` returns an id, keyed in a `Map`, so each caller gets an
+independent connection); `useRealtimeFeed.ts`/`useDepthData.ts` updated to use
+the returned id. Verified in-browser: two tiles on EUR/USD and GBP/USD now show
+correct, independently-updating prices instead of collapsing to one. Added a
+`driveOrders` opt-out on `mt5Feed.connect()` so secondary subscriptions (this
+panel's glance timeframes, the DOM panel's depth-only subscription) don't each
+run their own random walk against `orderService`'s position/pending-order
+checks — only the chart tile actually trading a symbol should do that.
+`MultiTimeframePanel` seeds each mini-chart via `dataLoader.ts`'s
+`generateMockData` (scaled per timeframe to ~30 bars each) since the feed's
+candle bucketing is wall-clock-real-time — without a seed, a 1D/1W subscription
+would show almost no history within a normal session.
+
 **Not ported, and why:**
 - `components/MT5FeedSelector.tsx`, `hooks/useMT5Feed.ts`, `hooks/useMT5NativeBridge.ts` —
   multi-account UI/data layer for the ZeroMQ bridge. `useMT5NativeBridge.ts` also has
   a dangling import (`../services/mt5-native-bridge`, a file that never existed in
   this package). The live bridge (`server/mt5-bridge.js`) is single-account only, so
   there's no backend for a multi-account selector today.
-- `components/SLTPDragOverlay.tsx` + `utils/chart-helpers.ts` — a nicer *visual*
-  drag-to-modify SL/TP interaction (live handle + label showing price and pip
-  distance while dragging) than what's live today in `src/components/PositionLines.tsx`
-  (which drags invisibly — no handle/label follows the cursor, you only see the
-  result on mouseup). Worth revisiting as a UX upgrade to `PositionLines.tsx`, but
-  wiring it to `lightweight-charts`' real coordinate system (`series.priceToCoordinate`/
-  `coordinateToPrice`, the same API bug that was fixed elsewhere in this audit)
-  needed more care than this pass had budget for.
-- `components/MultiTimeframePanel.tsx` — needs a data-fetching path for secondary
-  timeframes that doesn't exist live (the app only loads OHLCV for the chart's own
-  active timeframe, via `src/services/dataLoader.ts`). Fetching N extra timeframes
-  per chart tile is a real feature, not a quick port.
 
-`types/mt5.ts` and `utils/chart-helpers.ts` are kept because the files above still
-import from them (`MultiTimeframePanel`/`MT5FeedSelector` use `types/mt5.ts`;
-`SLTPDragOverlay` pairs with `chart-helpers.ts`'s price↔coordinate math). Everything
-else that only existed to support the now-deleted, already-ported files was removed.
+`types/mt5.ts` is kept because `MT5FeedSelector`/`useMT5Feed` still import from
+it. Everything else that only existed to support now-deleted, already-handled
+files was removed.
 
 The ZeroMQ backend this package originally talked to (`mt5-bridge/bridge/`) was
 deleted outright rather than archived — it's incompatible with the actual EA and
