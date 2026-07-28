@@ -1,4 +1,5 @@
 import { useLayoutStore } from '@/stores/layoutStore'
+import type { ChartPanelToggles } from '@/components/TradingTerminal'
 import ChartTile from './ChartTile'
 
 const LAYOUT_GRID: Record<string, string> = {
@@ -9,7 +10,14 @@ const LAYOUT_GRID: Record<string, string> = {
   '2x3': 'grid-cols-3 grid-rows-2',
 }
 
-export default function MultiChartLayout() {
+interface MultiChartLayoutProps {
+  activeTool: string
+  onToolSelect: (tool: string) => void
+  chartPanels: ChartPanelToggles
+  onChartPanelClose: (panel: keyof ChartPanelToggles) => void
+}
+
+export default function MultiChartLayout({ activeTool, onToolSelect, chartPanels, onChartPanelClose }: MultiChartLayoutProps) {
   const { layout } = useLayoutStore()
   const gridClass = LAYOUT_GRID[layout.type] || LAYOUT_GRID['1x1']
 
@@ -20,6 +28,10 @@ export default function MultiChartLayout() {
           key={chart.id}
           chartId={chart.id}
           isActive={layout.activeChartId === chart.id}
+          activeTool={activeTool}
+          onToolSelect={onToolSelect}
+          chartPanels={chartPanels}
+          onChartPanelClose={onChartPanelClose}
         />
       ))}
     </div>

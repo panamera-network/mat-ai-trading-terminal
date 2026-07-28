@@ -1,7 +1,7 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
-import { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
+import { IChartApi, ISeriesApi, Logical, Time } from 'lightweight-charts'
 import { nanoid } from 'nanoid'
-import { DrawingType, Drawing, DrawingPoint } from '@/types'
+import { CandleData, DrawingType, Drawing, DrawingPoint } from '@/types'
 import { useLayoutStore } from '@/stores/layoutStore'
 
 interface DrawingOverlayProps {
@@ -9,6 +9,7 @@ interface DrawingOverlayProps {
   chart: IChartApi
   candleSeries: ISeriesApi<'Candlestick'> | null
   activeTool: DrawingType
+  data: CandleData[]
 }
 
 interface SvgPoint {
@@ -16,7 +17,25 @@ interface SvgPoint {
   y: number
 }
 
-export default function DrawingOverlay({ chartId, chart, candleSeries, activeTool }: DrawingOverlayProps) {
+interface MagnetCandle {
+  open: number
+  high: number
+  low: number
+  close: number
+}
+
+function isMagnetCandle(value: unknown): value is MagnetCandle {
+  if (!value || typeof value !== 'object') return false
+  const candle = value as Record<string, unknown>
+  return (
+    typeof candle.open === 'number' &&
+    typeof candle.high === 'number' &&
+    typeof candle.low === 'number' &&
+    typeof candle.close === 'number'
+  )
+}
+
+export default function DrawingOverlay({ chartId, chart, candleSeries, activeTool, data }: DrawingOverlayProps) {
   const svgRef = useRef<SVGSVGElement>(null)
   const drawings = useLayoutStore((s) => s.layout.charts.find((c) => c.id === chartId)?.drawings ?? [])
   const selectedDrawing = useLayoutStore((s) => s.layout.charts.find((c) => c.id === chartId)?.selectedDrawing ?? null)
@@ -91,7 +110,7 @@ export default function DrawingOverlay({ chartId, chart, candleSeries, activeToo
   const chartToSvg = useCallback((time: number, price: number): SvgPoint | null => {
     if (!chart || !candleSeries) return null
     const timeScale = chart.timeScale()
-    const x = timeScale.timeToCoordinate(time as Time)
+    const x = timeScale.timeToCoordinate(time as Time) ?? timeScale.logicalToCoordinate(time as Logical)
     const y = candleSeries.priceToCoordinate(price)
     if (x === null || y === null) return null
     return { x, y }
@@ -100,44 +119,48 @@ export default function DrawingOverlay({ chartId, chart, candleSeries, activeToo
   const svgToChart = useCallback((x: number, y: number): DrawingPoint | null => {
     if (!chart || !candleSeries) return null
     const timeScale = chart.timeScale()
-    const time = timeScale.coordinateToTime(x)
+    const logical = timeScale.coordinateToLogical(x)
+    const time = timeScale.coordinateToTime(x) ?? logical
     const price = candleSeries.coordinateToPrice(y)
     if (time === null || price === null) return null
-    return { time: time as number, price }
-  }, [chart, candleSeries])
+    if (!magnetMode || logical === null || data.length === 0) return { time: time as number, price }
+
+    const candle = data[Math.max(0, Math.min(data.length - 1, Math.round(logical)))]
+    const prices = [candle.open, candle.high, candle.low, candle.close]
+    const nearestPrice = prices.reduce((prev, curr) =>
+      Math.abs(curr - price) < Math.abs(prev - price) ? curr : prev
+    )
+    return { time: candle.time, price: nearestPrice }
+  }, [chart, candleSeries, data, magnetMode])
 
   // Magnet snap
   const snapToMagnet = useCallback((point: DrawingPoint): DrawingPoint => {
-    if (!magnetMode || !candleSeries) return point
+    if (!magnetMode || !candleSeries || data.length === 0) return point
     const timeScale = chart.timeScale()
-    const x = timeScale.timeToCoordinate(point.time as Time)
+    const x = timeScale.timeToCoordinate(point.time as Time) ?? timeScale.logicalToCoordinate(point.time as Logical)
     if (x === null) return point
     const logical = timeScale.coordinateToLogical(x)
     if (logical === null) return point
-    const data = candleSeries.data()
-    const candle = data[logical]
-    if (!candle || !('open' in candle)) return point
+    const candle = data[Math.max(0, Math.min(data.length - 1, Math.round(logical)))]
+    if (!isMagnetCandle(candle)) return point
     const prices = [candle.open, candle.high, candle.low, candle.close]
     const nearestPrice = prices.reduce((prev, curr) => 
       Math.abs(curr - point.price) < Math.abs(prev - point.price) ? curr : prev
     )
-    return { time: point.time, price: nearestPrice }
-  }, [chart, candleSeries, magnetMode])
+    return { time: candle.time, price: nearestPrice }
+  }, [chart, candleSeries, data, magnetMode])
 
   const handleMouseDown = (e: React.MouseEvent<SVGSVGElement>) => {
-    // Handle dragging existing drawing points
-    if (activeTool === 'cursor' && selectedDrawing) {
-      const target = e.target as SVGElement
-      const pointData = target.closest('[data-point]')?.getAttribute('data-point')
-      if (pointData) {
-        const [drawingId, pointIndex] = pointData.split(':')
-        setDraggingPoint({ drawingId, pointIndex: parseInt(pointIndex) })
-        return
-      }
+    const target = e.target as SVGElement
+    const pointData = target.closest('[data-point]')?.getAttribute('data-point')
+    if (pointData) {
+      const [drawingId, pointIndex] = pointData.split(':')
+      selectDrawing(drawingId)
+      setDraggingPoint({ drawingId, pointIndex: parseInt(pointIndex, 10) })
+      return
     }
 
     if (activeTool === 'cursor') {
-      const target = e.target as SVGElement
       const drawingId = target.closest('[data-drawing-id]')?.getAttribute('data-drawing-id')
       if (drawingId) {
         selectDrawing(drawingId)
@@ -219,6 +242,7 @@ export default function DrawingOverlay({ chartId, chart, candleSeries, activeToo
         text: activeTool === 'text' ? 'Text' : undefined,
       }
       addDrawing(newDrawing)
+      selectDrawing(newDrawing.id)
       setIsDrawing(false)
       setTempPoints([])
       setSvgPoints([])
@@ -241,6 +265,7 @@ export default function DrawingOverlay({ chartId, chart, candleSeries, activeToo
       width: 1,
     }
     addDrawing(newDrawing)
+    selectDrawing(newDrawing.id)
     setIsDrawing(false)
     setTempPoints([])
     setSvgPoints([])
@@ -506,10 +531,8 @@ export default function DrawingOverlay({ chartId, chart, candleSeries, activeToo
               fill={isSelected ? 'rgba(41, 98, 255, 0.1)' : 'none'}
               stroke={color} strokeWidth={width}
               strokeDasharray={drawing.style === 'dashed' ? '5,5' : undefined} />
-            {renderHandle({ x, y }, 0)}
-            {renderHandle({ x: x + w, y }, 1)}
-            {renderHandle({ x, y: y + h }, 2)}
-            {renderHandle({ x: x + w, y: y + h }, 3)}
+            {renderHandle(p1, 0)}
+            {renderHandle(p2, 1)}
           </g>
         )
       }
@@ -671,7 +694,7 @@ export default function DrawingOverlay({ chartId, chart, candleSeries, activeToo
     <svg
       ref={svgRef}
       key={renderKey}
-      className="absolute inset-0 pointer-events-auto"
+      className="absolute inset-0 h-full w-full pointer-events-auto touch-none"
       style={{ zIndex: 10 }}
       onMouseDown={handleMouseDown}
       onMouseMove={handleMouseMove}

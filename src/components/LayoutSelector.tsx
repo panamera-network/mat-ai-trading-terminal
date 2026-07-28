@@ -2,11 +2,11 @@ import { useLayoutStore } from '@/stores/layoutStore'
 import { useCallback } from 'react'
 
 const LAYOUTS = [
-  { type: '1x1' as const, label: '1×1', icon: '□' },
-  { type: '1x2' as const, label: '1×2', icon: '□□' },
-  { type: '1x3' as const, label: '1×3', icon: '□□□' },
-  { type: '2x2' as const, label: '2×2', icon: '田' },
-  { type: '2x3' as const, label: '2×3', icon: '▦' },
+  { type: '1x1' as const, label: '1x1', icon: '1' },
+  { type: '1x2' as const, label: '1x2', icon: '2H' },
+  { type: '1x3' as const, label: '1x3', icon: '3H' },
+  { type: '2x2' as const, label: '2x2', icon: '4' },
+  { type: '2x3' as const, label: '2x3', icon: '6' },
 ]
 
 export default function LayoutSelector() {

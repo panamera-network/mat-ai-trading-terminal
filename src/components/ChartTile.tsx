@@ -1,5 +1,16 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
-import { createChart, IChartApi, ISeriesApi, CandlestickData, LineData, Time, HistogramData } from 'lightweight-charts'
+import {
+  AreaSeries,
+  CandlestickSeries,
+  createChart,
+  HistogramSeries,
+  IChartApi,
+  ISeriesApi,
+  LineSeries,
+  Time,
+  HistogramData,
+} from 'lightweight-charts'
+import { X } from 'lucide-react'
 import { useLayoutStore } from '@/stores/layoutStore'
 import { useBacktestStore } from '@/stores/backtestStore'
 import { useRealtimeFeed } from '@/hooks/useRealtimeFeed'
@@ -8,9 +19,8 @@ import { useStrategyRunner } from '@/hooks/useStrategyRunner'
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts'
 import { useOrderStore } from '@/stores/orderStore'
 import { alertsService } from '@/services/alertsService'
-import { ALL_SYMBOLS } from '@/types/market'
-import { Timeframe, ChartType } from '@/types'
-import DrawingOverlay from './DrawingOverlay'
+import { ChartType } from '@/types'
+import type { ChartPanelToggles } from '@/components/TradingTerminal'
 import OrderPanel from './OrderPanel'
 import DOMPanel from './DOMPanel'
 import StrategyPanel from './StrategyPanel'
@@ -19,46 +29,40 @@ import ChartContextMenu from './ChartContextMenu'
 import AlertsPanel from './AlertsPanel'
 import PnLDashboard from './PnLDashboard'
 import TradeJournal from './TradeJournal'
-import DrawingTemplateManager from './DrawingTemplateManager'
 import MultiTimeframePanel from './MultiTimeframePanel'
 import KeyboardHelpModal from './KeyboardHelpModal'
-import LeftSidebar from './LeftSidebar'
 import IndicatorsModal from './IndicatorsModal'
 import IndicatorOverlay from './IndicatorOverlay'
 import IndicatorPanel from './IndicatorPanel'
 import VolumeProfileIndicator from './VolumeProfileIndicator'
-import BottomPanel from './BottomPanel'
+import PluginDrawingLayer from './PluginDrawingLayer'
 
 interface ChartTileProps {
   chartId: string
   isActive: boolean
+  activeTool: string
+  onToolSelect: (tool: string) => void
+  chartPanels: ChartPanelToggles
+  onChartPanelClose: (panel: keyof ChartPanelToggles) => void
 }
 
-export default function ChartTile({ chartId, isActive }: ChartTileProps) {
-  const containerRef = useRef<HTMLDivElement>(null)
+export default function ChartTile({ chartId, isActive, activeTool, onToolSelect, chartPanels, onChartPanelClose }: ChartTileProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<any> | null>(null)
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
-  const [activeTool, setActiveTool] = useState('cursor')
-  const [showOrderPanel, setShowOrderPanel] = useState(false)
-  const [showDOM, setShowDOM] = useState(false)
-  const [showStrategy, setShowStrategy] = useState(false)
-  const [showAlerts, setShowAlerts] = useState(false)
+  const lastSeriesTimeRef = useRef<number | null>(null)
+  const isDrawingInteractionRef = useRef(false)
+  const followRealtimeRef = useRef(true)
+  const [chartApi, setChartApi] = useState<IChartApi | null>(null)
+  const [mainSeries, setMainSeries] = useState<ISeriesApi<any> | null>(null)
+  const [chartContainer, setChartContainer] = useState<HTMLDivElement | null>(null)
   const [showHelp, setShowHelp] = useState(false)
-  const [showPnL, setShowPnL] = useState(false)
-  const [showJournal, setShowJournal] = useState(false)
-  const [showTemplates, setShowTemplates] = useState(false)
-  const [showMTF, setShowMTF] = useState(false)
-  const [showIndicatorsModal, setShowIndicatorsModal] = useState(false)
 
   const chart = useLayoutStore((s) => s.layout.charts.find((c) => c.id === chartId)!)
   const updateChart = useLayoutStore((s) => s.updateChart)
   const setActiveChart = useLayoutStore((s) => s.setActiveChart)
   const removeChart = useLayoutStore((s) => s.removeChart)
-  const undoDrawing = useLayoutStore((s) => s.undoDrawing)
-  const redoDrawing = useLayoutStore((s) => s.redoDrawing)
-  const canUndo = useLayoutStore((s) => (s.drawingStacks.get(chartId)?.undo.length ?? 0) > 0)
-  const canRedo = useLayoutStore((s) => (s.drawingStacks.get(chartId)?.redo.length ?? 0) > 0)
 
   const isBacktestMode = useBacktestStore((s) => s.isBacktestMode)
   const backtestState = useBacktestStore((s) => s.state)
@@ -70,6 +74,11 @@ export default function ChartTile({ chartId, isActive }: ChartTileProps) {
   const placeOrder = useOrderStore((s) => s.placeOrder)
 
   useSyncCrosshair(chartRef.current, chartId)
+
+  const setContainerRef = useCallback((node: HTMLDivElement | null) => {
+    containerRef.current = node
+    setChartContainer(node)
+  }, [])
 
   const btCandle = isBacktestMode && backtestState?.currentCandle ? backtestState.currentCandle : null
   const bid = btCandle ? btCandle.bid.close : (prices?.bid || chart.lastPrice || 0)
@@ -108,7 +117,7 @@ export default function ChartTile({ chartId, isActive }: ChartTileProps) {
     chartId,
     chartRef,
     activeTool,
-    setActiveTool,
+    onToolSelect,
     handleQuickBuy,
     handleQuickSell,
     handleClosePosition
@@ -130,29 +139,30 @@ export default function ChartTile({ chartId, isActive }: ChartTileProps) {
     if (seriesRef.current) {
       chartApi.removeSeries(seriesRef.current)
       seriesRef.current = null
+      lastSeriesTimeRef.current = null
     }
     switch (type) {
       case 'candlestick':
-        return chartApi.addCandlestickSeries({
+        return chartApi.addSeries(CandlestickSeries, {
           upColor: '#26a69a', downColor: '#ef5350',
           borderUpColor: '#26a69a', borderDownColor: '#ef5350',
           wickUpColor: '#26a69a', wickDownColor: '#ef5350',
         })
       case 'line':
-        return chartApi.addLineSeries({ color: '#2962FF', lineWidth: 2 })
+        return chartApi.addSeries(LineSeries, { color: '#2962FF', lineWidth: 2 })
       case 'area':
-        return chartApi.addAreaSeries({
+        return chartApi.addSeries(AreaSeries, {
           lineColor: '#2962FF', topColor: 'rgba(41, 98, 255, 0.4)',
           bottomColor: 'rgba(41, 98, 255, 0.05)',
         })
       case 'heikin-ashi':
-        return chartApi.addCandlestickSeries({
+        return chartApi.addSeries(CandlestickSeries, {
           upColor: '#26a69a', downColor: '#ef5350',
           borderUpColor: '#26a69a', borderDownColor: '#ef5350',
           wickUpColor: '#26a69a', wickDownColor: '#ef5350',
         })
       default:
-        return chartApi.addCandlestickSeries({
+        return chartApi.addSeries(CandlestickSeries, {
           upColor: '#26a69a', downColor: '#ef5350',
           borderUpColor: '#26a69a', borderDownColor: '#ef5350',
           wickUpColor: '#26a69a', wickDownColor: '#ef5350',
@@ -169,12 +179,25 @@ export default function ChartTile({ chartId, isActive }: ChartTileProps) {
       crosshair: { mode: 1 },
       rightPriceScale: { borderColor: '#2B2B43' },
       timeScale: { borderColor: '#2B2B43' },
+      handleScroll: {
+        mouseWheel: true,
+        pressedMouseMove: true,
+        horzTouchDrag: true,
+        vertTouchDrag: false,
+      },
+      handleScale: {
+        axisPressedMouseMove: true,
+        mouseWheel: true,
+        pinch: true,
+      },
     })
     const series = createSeries(chartApi, chart.chartType)
     chartRef.current = chartApi
     seriesRef.current = series
+    setChartApi(chartApi)
+    setMainSeries(series)
 
-    const volumeSeries = chartApi.addHistogramSeries({
+    const volumeSeries = chartApi.addSeries(HistogramSeries, {
       priceFormat: { type: 'volume' },
       priceScaleId: 'volume',
     })
@@ -186,15 +209,27 @@ export default function ChartTile({ chartId, isActive }: ChartTileProps) {
         chartApi.applyOptions({ width: containerRef.current.clientWidth, height: containerRef.current.clientHeight })
       }
     }
+    const resizeObserver = new ResizeObserver(handleResize)
+    resizeObserver.observe(containerRef.current)
     window.addEventListener('resize', handleResize)
     handleResize()
 
+    const updateFollowRealtime = () => {
+      const scrollPosition = chartApi.timeScale().scrollPosition()
+      followRealtimeRef.current = scrollPosition <= 1
+    }
+    chartApi.timeScale().subscribeVisibleLogicalRangeChange(updateFollowRealtime)
+
     return () => {
+      chartApi.timeScale().unsubscribeVisibleLogicalRangeChange(updateFollowRealtime)
+      resizeObserver.disconnect()
       window.removeEventListener('resize', handleResize)
       chartApi.remove()
       chartRef.current = null
       seriesRef.current = null
       volumeSeriesRef.current = null
+      setChartApi(null)
+      setMainSeries(null)
     }
   }, [chartId])
 
@@ -203,20 +238,36 @@ export default function ChartTile({ chartId, isActive }: ChartTileProps) {
     if (!chartRef.current) return
     const series = createSeries(chartRef.current, chart.chartType)
     seriesRef.current = series
+    setMainSeries(series)
     if (chart.data.length > 0) {
-      const formatted = formatDataForChartType(chart.data, chart.chartType)
+      const orderedData = normalizeChartData(chart.data)
+      const formatted = formatDataForChartType(orderedData, chart.chartType)
       series.setData(formatted as any)
-      volumeSeriesRef.current?.setData(formatVolumeData(chart.data))
+      volumeSeriesRef.current?.setData(formatVolumeData(orderedData))
+      lastSeriesTimeRef.current = getTimeOrderValue(orderedData[orderedData.length - 1]?.time)
     }
   }, [chart.chartType])
 
   // Live mode: update from store
   useEffect(() => {
     if (isBacktestMode || !seriesRef.current || chart.data.length === 0) return
-    const lastCandle = chart.data[chart.data.length - 1]
-    const formatted = formatCandleForChartType(lastCandle, chart.chartType, chart.data)
-    seriesRef.current.update(formatted as any)
-    volumeSeriesRef.current?.update(formatVolumeBar(lastCandle))
+    const orderedData = normalizeChartData(chart.data)
+    const lastCandle = orderedData[orderedData.length - 1]
+    const lastTime = getTimeOrderValue(lastCandle?.time)
+    if (lastTime === null) return
+
+    if (lastSeriesTimeRef.current !== null && lastTime < lastSeriesTimeRef.current) {
+      seriesRef.current.setData(formatDataForChartType(orderedData, chart.chartType) as any)
+      volumeSeriesRef.current?.setData(formatVolumeData(orderedData))
+    } else {
+      const formatted = formatCandleForChartType(lastCandle, chart.chartType, orderedData)
+      seriesRef.current.update(formatted as any)
+      volumeSeriesRef.current?.update(formatVolumeBar(lastCandle))
+    }
+    lastSeriesTimeRef.current = lastTime
+    if (chartRef.current && followRealtimeRef.current && !isDrawingInteractionRef.current) {
+      chartRef.current.timeScale().scrollToRealTime()
+    }
 
     // Check alerts on price update
     const bid = lastCandle.close - 0.0001
@@ -260,19 +311,6 @@ export default function ChartTile({ chartId, isActive }: ChartTileProps) {
     })
   }, [chart.showGrid])
 
-  const handleSymbolChange = useCallback((symbolId: string) => {
-    const symbol = ALL_SYMBOLS.find((s) => s.id === symbolId)
-    if (symbol) updateChart(chartId, { symbol, data: [] })
-  }, [chartId, updateChart])
-
-  const handleTimeframeChange = useCallback((tf: Timeframe) => {
-    updateChart(chartId, { timeframe: tf, data: [] })
-  }, [chartId, updateChart])
-
-  const handleChartTypeChange = useCallback((type: ChartType) => {
-    updateChart(chartId, { chartType: type })
-  }, [chartId, updateChart])
-
   const currentCandle = btCandle || (chart.data.length > 0 ? chart.data[chart.data.length - 1] : null)
   useStrategyRunner(chart.symbol, bid, ask, spread, currentCandle)
 
@@ -282,82 +320,86 @@ export default function ChartTile({ chartId, isActive }: ChartTileProps) {
 
   return (
     <div className={`relative flex flex-col border ${isActive ? 'border-blue-500' : 'border-gray-800'} bg-chart-bg overflow-hidden`} onClick={() => setActiveChart(chartId)}>
-      {/* Header */}
-      <div className="flex items-center justify-between px-2 py-1 bg-[#161a25] border-b border-gray-800 min-h-[32px]">
+      {/* Chart panel header */}
+      <div className="flex items-center justify-between px-2 py-1 bg-[#161a25] border-b border-gray-800 min-h-[30px]">
         <div className="flex items-center gap-2">
-          <select value={chart.symbol.id} onChange={(e) => handleSymbolChange(e.target.value)} disabled={isBacktestMode} className="bg-[#1e222d] text-white text-xs px-2 py-0.5 rounded border border-gray-700 outline-none disabled:opacity-50">
-            {ALL_SYMBOLS.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
-          </select>
-          <select value={chart.timeframe} onChange={(e) => handleTimeframeChange(e.target.value as Timeframe)} disabled={isBacktestMode} className="bg-[#1e222d] text-white text-xs px-2 py-0.5 rounded border border-gray-700 outline-none disabled:opacity-50">
-            {['1m', '5m', '15m', '1H', '4H', '1D', '1W'].map((tf) => <option key={tf} value={tf}>{tf}</option>)}
-          </select>
-          <select value={chart.chartType} onChange={(e) => handleChartTypeChange(e.target.value as ChartType)} className="bg-[#1e222d] text-white text-xs px-2 py-0.5 rounded border border-gray-700 outline-none">
-            <option value="candlestick">Candles</option>
-            <option value="line">Line</option>
-            <option value="area">Area</option>
-            <option value="heikin-ashi">Heikin</option>
-          </select>
-          <span className={`text-[10px] px-1.5 py-0.5 rounded ${isBacktestMode ? 'bg-purple-900/50 text-purple-400 border border-purple-800' : 'bg-green-900/50 text-green-400 border border-green-800'}`}>
-            {isBacktestMode ? 'BACKTEST' : 'LIVE'}
+          <span className="text-xs font-semibold text-gray-200">{chart.symbol.name}</span>
+          <span className="text-[10px] text-gray-500">{chart.timeframe}</span>
+          <span className={`h-2 w-2 rounded-full ${isActive ? 'bg-blue-400' : 'bg-gray-700'}`} />
+          <span className={`text-[10px] px-1.5 py-0.5 rounded border ${isBacktestMode ? 'bg-purple-900/40 text-purple-300 border-purple-800' : 'bg-emerald-900/30 text-emerald-300 border-emerald-800'}`}>
+            {isBacktestMode ? 'BT' : 'LIVE'}
           </span>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-3 min-w-0">
           {!isBacktestMode && <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-red-500'}`} />}
           {bid > 0 && ask > 0 && (
-            <span className="text-xs font-mono">
-              <span className="text-green-400">{bid.toFixed(chart.symbol.digits)}</span>
+            <span className="text-[11px] font-mono whitespace-nowrap">
+              <span className="text-emerald-400">{bid.toFixed(chart.symbol.digits)}</span>
               <span className="text-gray-600 mx-1">|</span>
               <span className="text-red-400">{ask.toFixed(chart.symbol.digits)}</span>
             </span>
           )}
-          <button onClick={() => undoDrawing(chartId)} disabled={!canUndo} className="text-[10px] px-1.5 py-0.5 rounded border border-gray-700 text-gray-500 disabled:opacity-30 hover:text-white" title="Undo">↶</button>
-          <button onClick={() => redoDrawing(chartId)} disabled={!canRedo} className="text-[10px] px-1.5 py-0.5 rounded border border-gray-700 text-gray-500 disabled:opacity-30 hover:text-white" title="Redo">↷</button>
-          <button onClick={() => setShowIndicatorsModal(!showIndicatorsModal)} className={`text-[10px] px-1.5 py-0.5 rounded border ${showIndicatorsModal ? 'bg-blue-900 border-blue-500 text-blue-300' : 'border-gray-700 text-gray-500'}`}>Indicators</button>
-          <button onClick={() => setShowAlerts(!showAlerts)} className={`text-[10px] px-1.5 py-0.5 rounded border ${showAlerts ? 'bg-yellow-900 border-yellow-500 text-yellow-300' : 'border-gray-700 text-gray-500'}`}>Alerts</button>
-          <button onClick={() => setShowStrategy(!showStrategy)} className={`text-[10px] px-1.5 py-0.5 rounded border ${showStrategy ? 'bg-purple-900 border-purple-500 text-purple-300' : 'border-gray-700 text-gray-500'}`}>Strategy</button>
-          <button onClick={() => setShowDOM(!showDOM)} className={`text-[10px] px-1.5 py-0.5 rounded border ${showDOM ? 'bg-blue-900 border-blue-500 text-blue-300' : 'border-gray-700 text-gray-500'}`}>DOM</button>
-          <button onClick={() => setShowOrderPanel(!showOrderPanel)} className={`text-[10px] px-1.5 py-0.5 rounded border ${showOrderPanel ? 'bg-blue-900 border-blue-500 text-blue-300' : 'border-gray-700 text-gray-500'}`}>Order</button>
-          <button onClick={() => setShowPnL(!showPnL)} className={`text-[10px] px-1.5 py-0.5 rounded border ${showPnL ? 'bg-blue-900 border-blue-500 text-blue-300' : 'border-gray-700 text-gray-500'}`}>P&amp;L</button>
-          <button onClick={() => setShowJournal(!showJournal)} className={`text-[10px] px-1.5 py-0.5 rounded border ${showJournal ? 'bg-blue-900 border-blue-500 text-blue-300' : 'border-gray-700 text-gray-500'}`}>Journal</button>
-          <button onClick={() => setShowTemplates(!showTemplates)} className={`text-[10px] px-1.5 py-0.5 rounded border ${showTemplates ? 'bg-blue-900 border-blue-500 text-blue-300' : 'border-gray-700 text-gray-500'}`}>Templates</button>
-          <button onClick={() => setShowMTF(!showMTF)} className={`text-[10px] px-1.5 py-0.5 rounded border ${showMTF ? 'bg-blue-900 border-blue-500 text-blue-300' : 'border-gray-700 text-gray-500'}`}>MTF</button>
-          {!isBacktestMode && <button onClick={() => removeChart(chartId)} className="text-gray-500 hover:text-red-400 text-xs px-1">×</button>}
+          {currentCandle && (
+            <span className="text-[10px] font-mono text-gray-400 whitespace-nowrap overflow-hidden text-ellipsis">
+              O <span className="text-gray-200">{currentCandle.open.toFixed(chart.symbol.digits)}</span>
+              <span className="mx-1" />
+              H <span className="text-emerald-300">{currentCandle.high.toFixed(chart.symbol.digits)}</span>
+              <span className="mx-1" />
+              L <span className="text-red-300">{currentCandle.low.toFixed(chart.symbol.digits)}</span>
+              <span className="mx-1" />
+              C <span className="text-gray-200">{currentCandle.close.toFixed(chart.symbol.digits)}</span>
+            </span>
+          )}
+          {!isBacktestMode && (
+            <button onClick={() => removeChart(chartId)} className="h-6 w-6 text-gray-500 hover:text-red-400 inline-flex items-center justify-center" title="Close chart">
+              <X size={14} />
+            </button>
+          )}
         </div>
       </div>
 
       {/* Chart + side panels */}
       <div className="flex flex-1 min-h-0">
-        <LeftSidebar chartId={chartId} activeTool={activeTool} onToolSelect={setActiveTool} />
-
         <div className="flex-1 flex flex-col min-w-0">
           <div
             className="relative bg-chart-bg"
             style={{ height: panelIndicators.length > 0 ? `calc(100% - ${panelIndicators.length * 120}px)` : '100%' }}
           >
-            <div ref={containerRef} className="absolute inset-0" />
-            <DrawingOverlay chartId={chartId} chart={chartRef.current!} candleSeries={seriesRef.current as any} activeTool={activeTool as any} />
-            {seriesRef.current && <PositionLines chart={chartRef.current!} series={seriesRef.current as any} symbol={chart.symbol} />}
-            <ChartContextMenu chart={chartRef.current} series={seriesRef.current} symbol={chart.symbol} bid={bid} ask={ask} spread={spread} />
-            {chartRef.current && (
+            <div ref={setContainerRef} className="absolute inset-0" />
+            {chartApi && mainSeries && (
+              <PluginDrawingLayer
+                chart={chartApi}
+                series={mainSeries as any}
+                container={chartContainer}
+                activeTool={activeTool as any}
+                onToolSelect={onToolSelect}
+                onDrawingInteractionChange={(isInteracting) => {
+                  isDrawingInteractionRef.current = isInteracting
+                }}
+              />
+            )}
+            {chartApi && mainSeries && <PositionLines chart={chartApi} series={mainSeries as any} symbol={chart.symbol} />}
+            <ChartContextMenu chart={chartApi} series={mainSeries} symbol={chart.symbol} bid={bid} ask={ask} spread={spread} />
+            {chartApi && mainSeries && (
               <IndicatorOverlay
-                chart={chartRef.current}
-                candleSeries={seriesRef.current as any}
+                chart={chartApi}
+                candleSeries={mainSeries as any}
                 data={chart.data}
                 indicators={overlayIndicators}
               />
             )}
-            {chartRef.current && volumeProfileIndicator && (
+            {chartApi && mainSeries && volumeProfileIndicator && (
               <VolumeProfileIndicator
-                chart={chartRef.current}
-                candleSeries={seriesRef.current as any}
+                chart={chartApi}
+                candleSeries={mainSeries as any}
                 data={chart.data}
                 visible={true}
                 bins={(volumeProfileIndicator.params.bins as number) || 50}
               />
             )}
-            {showIndicatorsModal && (
-              <IndicatorsModal chartId={chartId} onClose={() => setShowIndicatorsModal(false)} />
+            {isActive && chartPanels.indicators && (
+              <IndicatorsModal chartId={chartId} onClose={() => onChartPanelClose('indicators')} />
             )}
           </div>
 
@@ -371,24 +413,15 @@ export default function ChartTile({ chartId, isActive }: ChartTileProps) {
             </div>
           )}
 
-          <BottomPanel chartId={chartId} symbol={chart.symbol} />
         </div>
 
-        {showAlerts && <AlertsPanel symbol={chart.symbol.id} />}
-        {showStrategy && <StrategyPanel />}
-        {showDOM && <DOMPanel symbol={chart.symbol} />}
-        {showOrderPanel && <OrderPanel symbol={chart.symbol} bid={bid} ask={ask} spread={spread} />}
-        {showPnL && <PnLDashboard symbol={chart.symbol.id} />}
-        {showJournal && <TradeJournal />}
-        {showTemplates && (
-          <DrawingTemplateManager
-            symbol={chart.symbol.id}
-            timeframe={chart.timeframe}
-            currentDrawings={chart.drawings}
-            onApplyDrawings={(drawings) => updateChart(chartId, { drawings })}
-          />
-        )}
-        {showMTF && <MultiTimeframePanel symbol={chart.symbol} primaryTimeframe={chart.timeframe} />}
+        {isActive && chartPanels.alerts && <AlertsPanel symbol={chart.symbol.id} />}
+        {isActive && chartPanels.strategy && <StrategyPanel />}
+        {isActive && chartPanels.dom && <DOMPanel symbol={chart.symbol} />}
+        {isActive && chartPanels.order && <OrderPanel symbol={chart.symbol} bid={bid} ask={ask} spread={spread} />}
+        {isActive && chartPanels.pnl && <PnLDashboard symbol={chart.symbol.id} />}
+        {isActive && chartPanels.journal && <TradeJournal />}
+        {isActive && chartPanels.mtf && <MultiTimeframePanel symbol={chart.symbol} primaryTimeframe={chart.timeframe} />}
       </div>
 
       <KeyboardHelpModal isOpen={showHelp} onClose={() => setShowHelp(false)} />
@@ -411,6 +444,37 @@ function formatDataForChartType(data: any[], type: ChartType): any[] {
     default:
       return data.map((d) => ({ time: d.time as Time, open: d.open, high: d.high, low: d.low, close: d.close }))
   }
+}
+
+function getTimeOrderValue(time: unknown): number | null {
+  if (typeof time === 'number') return time
+  if (typeof time === 'string') {
+    const parsed = Date.parse(time)
+    return Number.isNaN(parsed) ? null : Math.floor(parsed / 1000)
+  }
+  if (time && typeof time === 'object') {
+    const maybeDate = time as { year?: unknown; month?: unknown; day?: unknown }
+    if (
+      typeof maybeDate.year === 'number' &&
+      typeof maybeDate.month === 'number' &&
+      typeof maybeDate.day === 'number'
+    ) {
+      return Date.UTC(maybeDate.year, maybeDate.month - 1, maybeDate.day) / 1000
+    }
+  }
+  return null
+}
+
+function normalizeChartData<T extends { time: unknown }>(data: T[]): T[] {
+  const byTime = new Map<number, T>()
+  for (const item of data) {
+    const orderTime = getTimeOrderValue(item.time)
+    if (orderTime === null) continue
+    byTime.set(orderTime, item)
+  }
+  return Array.from(byTime.entries())
+    .sort(([a], [b]) => a - b)
+    .map(([, item]) => item)
 }
 
 function formatVolumeData(data: any[]): HistogramData[] {

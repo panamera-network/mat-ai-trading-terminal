@@ -12,7 +12,12 @@ const DURATION_OPTIONS = [
   { label: '1 Year', days: 365 },
 ]
 
-export default function BacktestSetup() {
+interface BacktestSetupProps {
+  variant?: 'modal' | 'panel'
+  onClose?: () => void
+}
+
+export default function BacktestSetup({ variant = 'modal', onClose }: BacktestSetupProps) {
   const { enterBacktestMode, loadData } = useBacktestStore()
   const [symbolId, setSymbolId] = useState('EURUSD')
   const [timeframe, setTimeframe] = useState('1H')
@@ -44,14 +49,21 @@ export default function BacktestSetup() {
     enterBacktestMode()
     loadData(data, config)
     setIsLoading(false)
+    onClose?.()
   }
 
-  return (
-    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
-      <div className="bg-[#161a25] border border-gray-700 rounded-lg w-[400px] p-5">
-        <h2 className="text-white text-lg font-semibold mb-4">Backtest Setup</h2>
+  const handleCancel = () => {
+    useBacktestStore.getState().exitBacktestMode()
+    onClose?.()
+  }
 
-        <div className="space-y-3">
+  const content = (
+    <div className={variant === 'modal' ? 'bg-[#161a25] border border-gray-700 rounded-lg w-[400px] p-5' : 'h-full min-h-0 text-xs text-gray-400 flex flex-col'}>
+      <h2 className={variant === 'modal' ? 'text-white text-lg font-semibold mb-4' : 'text-white text-xs font-semibold uppercase tracking-wide mb-3 flex-shrink-0'}>
+        Backtest Setup
+      </h2>
+
+      <div className={variant === 'modal' ? 'space-y-3' : 'grid grid-cols-2 lg:grid-cols-3 gap-3 min-h-0 overflow-y-auto pr-1'}>
           {/* Symbol */}
           <div>
             <label className="text-gray-500 text-xs uppercase block mb-1">Symbol</label>
@@ -154,25 +166,32 @@ export default function BacktestSetup() {
               />
             )}
           </div>
-        </div>
-
-        {/* Actions */}
-        <div className="flex gap-2 mt-5">
-          <button
-            onClick={() => useBacktestStore.getState().exitBacktestMode()}
-            className="flex-1 py-2 text-sm rounded border border-gray-700 text-gray-400 hover:text-white transition-colors"
-          >
-            Cancel
-          </button>
-          <button
-            onClick={handleStart}
-            disabled={isLoading}
-            className="flex-1 py-2 text-sm rounded bg-blue-600 hover:bg-blue-500 text-white font-semibold disabled:opacity-50"
-          >
-            {isLoading ? 'Loading...' : 'Start Backtest'}
-          </button>
-        </div>
       </div>
+
+      {/* Actions */}
+      <div className={variant === 'modal' ? 'flex gap-2 mt-5' : 'flex gap-2 mt-3 justify-end flex-shrink-0'}>
+        <button
+          onClick={handleCancel}
+          className={variant === 'modal' ? 'flex-1 py-2 text-sm rounded border border-gray-700 text-gray-400 hover:text-white transition-colors' : 'px-4 py-1.5 text-xs rounded border border-gray-700 text-gray-400 hover:text-white transition-colors'}
+        >
+          Cancel
+        </button>
+        <button
+          onClick={handleStart}
+          disabled={isLoading}
+          className={variant === 'modal' ? 'flex-1 py-2 text-sm rounded bg-blue-600 hover:bg-blue-500 text-white font-semibold disabled:opacity-50' : 'px-4 py-1.5 text-xs rounded bg-violet-600 hover:bg-violet-500 text-white font-semibold disabled:opacity-50'}
+        >
+          {isLoading ? 'Loading...' : 'Start Backtest'}
+        </button>
+      </div>
+    </div>
+  )
+
+  if (variant === 'panel') return content
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+      {content}
     </div>
   )
 }

@@ -1,17 +1,29 @@
-import { useState } from 'react'
-import { Activity, List, TrendingUp, Settings } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { Activity, ChevronDown, ChevronUp, List, TrendingUp } from 'lucide-react'
 import { Symbol, ChartType } from '@/types/market'
 import { useOrderStore } from '@/stores/orderStore'
 import { useLayoutStore } from '@/stores/layoutStore'
+import BacktestSetup from '@/components/BacktestSetup'
 
-type PanelTab = 'trades' | 'orders' | 'positions' | 'settings'
+type PanelTab = 'trades' | 'orders' | 'positions' | 'settings' | 'backtest'
 
 interface BottomPanelProps {
   chartId: string
   symbol: Symbol
+  settingsOpen?: boolean
+  onSettingsOpenChange?: (open: boolean) => void
+  backtestOpen?: boolean
+  onBacktestOpenChange?: (open: boolean) => void
 }
 
-export default function BottomPanel({ chartId, symbol }: BottomPanelProps) {
+export default function BottomPanel({
+  chartId,
+  symbol,
+  settingsOpen = false,
+  onSettingsOpenChange,
+  backtestOpen = false,
+  onBacktestOpenChange,
+}: BottomPanelProps) {
   const [activeTab, setActiveTab] = useState<PanelTab>('trades')
   const [isExpanded, setIsExpanded] = useState(false)
 
@@ -30,13 +42,33 @@ export default function BottomPanel({ chartId, symbol }: BottomPanelProps) {
     { id: 'trades', label: 'Trades', icon: <Activity size={13} />, count: trades.length },
     { id: 'orders', label: 'Orders', icon: <List size={13} />, count: orders.length },
     { id: 'positions', label: 'Positions', icon: <TrendingUp size={13} />, count: positions.length },
-    { id: 'settings', label: 'Settings', icon: <Settings size={13} /> },
   ]
 
+  useEffect(() => {
+    if (settingsOpen) {
+      setActiveTab('settings')
+      setIsExpanded(true)
+    } else if (activeTab === 'settings') {
+      setIsExpanded(false)
+      setActiveTab('trades')
+    }
+  }, [settingsOpen])
+
+  useEffect(() => {
+    if (backtestOpen) {
+      setActiveTab('backtest')
+      setIsExpanded(true)
+    } else if (activeTab === 'backtest') {
+      setIsExpanded(false)
+      setActiveTab('trades')
+    }
+  }, [backtestOpen])
+
   if (!chart) return null
+  const expandedHeight = activeTab === 'backtest' ? 'h-64' : 'h-56'
 
   return (
-    <div className={`bg-[#161a25] border-t border-gray-800 transition-all duration-200 flex-shrink-0 ${isExpanded ? 'h-56' : 'h-7'}`}>
+    <div className={`bg-[#161a25] border-t border-gray-800 transition-all duration-200 flex-shrink-0 ${isExpanded ? expandedHeight : 'h-7'}`}>
       <div className="flex items-center h-7 border-b border-gray-800">
         {tabs.map((tab) => (
           <button
@@ -44,7 +76,12 @@ export default function BottomPanel({ chartId, symbol }: BottomPanelProps) {
             className={`flex items-center gap-1.5 px-3 h-full text-[10px] transition-colors ${
               activeTab === tab.id ? 'bg-[#1e222d] text-white border-t-2 border-blue-500' : 'text-gray-400 hover:text-gray-200 hover:bg-gray-800'
             }`}
-            onClick={() => { setActiveTab(tab.id); setIsExpanded(true) }}
+            onClick={() => {
+              onSettingsOpenChange?.(false)
+              onBacktestOpenChange?.(false)
+              setActiveTab(tab.id)
+              setIsExpanded(true)
+            }}
           >
             {tab.icon}
             {tab.label}
@@ -54,13 +91,21 @@ export default function BottomPanel({ chartId, symbol }: BottomPanelProps) {
 
         <div className="flex-1" />
 
-        <button className="px-3 text-gray-400 hover:text-white text-[10px]" onClick={() => setIsExpanded(!isExpanded)}>
-          {isExpanded ? '▼' : '▲'}
+        <button
+          className="px-3 text-gray-400 hover:text-white text-[10px]"
+          onClick={() => {
+            const nextExpanded = !isExpanded
+            setIsExpanded(nextExpanded)
+            if (!nextExpanded && activeTab === 'settings') onSettingsOpenChange?.(false)
+            if (!nextExpanded && activeTab === 'backtest') onBacktestOpenChange?.(false)
+          }}
+        >
+          {isExpanded ? <ChevronDown size={13} /> : <ChevronUp size={13} />}
         </button>
       </div>
 
       {isExpanded && (
-        <div className="p-2 h-[calc(100%-1.75rem)] overflow-auto">
+        <div className="p-2 h-[calc(100%-1.75rem)] min-h-0 overflow-auto">
           {activeTab === 'trades' && (
             trades.length === 0 ? (
               <div className="flex items-center justify-center h-24 text-gray-500 text-xs">No trades yet for {symbol.name}.</div>
@@ -145,6 +190,10 @@ export default function BottomPanel({ chartId, symbol }: BottomPanelProps) {
                 <input type="checkbox" checked={magnetMode} onChange={() => toggleMagnetMode()} className="accent-blue-500" />
               </div>
             </div>
+          )}
+
+          {activeTab === 'backtest' && (
+            <BacktestSetup variant="panel" onClose={() => onBacktestOpenChange?.(false)} />
           )}
         </div>
       )}

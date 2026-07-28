@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react'
-import { IChartApi, ISeriesApi, Time } from 'lightweight-charts'
+import { IChartApi, ISeriesApi, LineSeries, Time } from 'lightweight-charts'
 import { OHLCV } from '@/types'
 import { calculateVolumeProfile } from '@/utils/indicators'
 
@@ -60,7 +60,7 @@ export default function VolumeProfileIndicator({
     if (!firstTime || !lastTime) return cleanup
 
     try {
-      const pocSeries = chart.addLineSeries({
+      const pocSeries = chart.addSeries(LineSeries, {
         color: '#2962FF',
         lineWidth: 2,
         title: `POC ${poc.toFixed(2)}`,
@@ -73,7 +73,7 @@ export default function VolumeProfileIndicator({
       ])
       seriesRef.current.pocSeries = pocSeries
 
-      const vahSeries = chart.addLineSeries({
+      const vahSeries = chart.addSeries(LineSeries, {
         color: '#26a69a',
         lineWidth: 1,
         lineStyle: 2,
@@ -87,7 +87,7 @@ export default function VolumeProfileIndicator({
       ])
       seriesRef.current.vahSeries = vahSeries
 
-      const valSeries = chart.addLineSeries({
+      const valSeries = chart.addSeries(LineSeries, {
         color: '#ef5350',
         lineWidth: 1,
         lineStyle: 2,

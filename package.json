@@ -13,26 +13,27 @@
     "tauri:build": "tauri build"
   },
   "dependencies": {
+    "@tauri-apps/api": "^1.5.3",
+    "clsx": "^2.1.1",
+    "lightweight-charts": "^5.2.0",
+    "lightweight-charts-drawing": "file:../lightweight-charts-drawing-main",
+    "lucide-react": "^0.400.0",
+    "nanoid": "^5.0.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "lightweight-charts": "^4.1.3",
-    "zustand": "^4.5.2",
-    "nanoid": "^5.0.0",
-    "@tauri-apps/api": "^1.5.3",
-    "lucide-react": "^0.400.0",
-    "clsx": "^2.1.1",
-    "tailwind-merge": "^2.3.0"
+    "tailwind-merge": "^2.3.0",
+    "zustand": "^4.5.2"
   },
   "devDependencies": {
+    "@tauri-apps/cli": "^1.5.14",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",
-    "typescript": "^5.4.5",
-    "vite": "^5.3.1",
-    "tailwindcss": "^3.4.4",
-    "postcss": "^8.4.38",
     "autoprefixer": "^10.4.19",
-    "@tauri-apps/cli": "^1.5.14",
-    "concurrently": "^8.2.0"
+    "concurrently": "^8.2.0",
+    "postcss": "^8.4.38",
+    "tailwindcss": "^3.4.4",
+    "typescript": "^5.4.5",
+    "vite": "^5.3.1"
   }
 }
