@@ -304,10 +304,9 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
             style={{ height: panelIndicators.length > 0 ? `calc(100% - ${panelIndicators.length * 120}px)` : '100%' }}
           >
             <div ref={setContainerRef} className="absolute inset-0" />
-            {chartApi && mainSeries && (
+            {chartApi && mainSeries && controllerRef.current && (
               <PluginDrawingLayer
-                chart={chartApi}
-                series={mainSeries as any}
+                controller={controllerRef.current}
                 container={chartContainer}
                 activeTool={activeTool as any}
                 onToolSelect={onToolSelect}

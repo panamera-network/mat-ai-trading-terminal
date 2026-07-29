@@ -5,6 +5,7 @@ export interface ChartPluginContext {
   chart: IChartApi
   mainSeries: ISeriesApi<SeriesType>
   getData: () => readonly CandleData[]
+  requestInteractionLock: (reason?: string) => () => void
 }
 
 export interface ChartPlugin {

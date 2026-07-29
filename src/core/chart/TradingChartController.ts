@@ -34,6 +34,7 @@ export class TradingChartController {
   private chartType: ChartType
   private candles: CandleData[] = []
   private plugins = new Map<string, ChartPlugin>()
+  private interactionLocks = new Set<string>()
 
   constructor(
     private readonly container: HTMLElement,
@@ -191,6 +192,7 @@ export class TradingChartController {
     this.mainSeries = null
     this.volumeSeries = null
     this.candles = []
+    this.interactionLocks.clear()
   }
 
   private createMainSeries(type: ChartType): ISeriesApi<SeriesType> {
@@ -245,7 +247,39 @@ export class TradingChartController {
       chart: this.chart,
       mainSeries: this.mainSeries,
       getData: () => this.candles,
+      requestInteractionLock: (reason) => this.requestInteractionLock(reason),
     }
+  }
+
+  private requestInteractionLock(reason = 'plugin'): () => void {
+    const lockId = `${reason}-${Math.random().toString(36).slice(2)}`
+    this.interactionLocks.add(lockId)
+    this.applyInteractionLockState()
+
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.interactionLocks.delete(lockId)
+      this.applyInteractionLockState()
+    }
+  }
+
+  private applyInteractionLockState() {
+    const enabled = this.interactionLocks.size > 0
+    this.chart?.applyOptions({
+      handleScroll: {
+        mouseWheel: !enabled,
+        pressedMouseMove: !enabled,
+        horzTouchDrag: !enabled,
+        vertTouchDrag: false,
+      },
+      handleScale: {
+        axisPressedMouseMove: !enabled,
+        mouseWheel: !enabled,
+        pinch: !enabled,
+      },
+    })
   }
 }
 
