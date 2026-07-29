@@ -11,6 +11,7 @@ import {
   HistogramData,
 } from 'lightweight-charts'
 import { CandleData, ChartType } from '@/types'
+import { ChartPlugin, ChartPluginContext } from '@/core/chart/ChartPlugin'
 
 export interface TradingChartControllerOptions {
   chartType: ChartType
@@ -32,6 +33,7 @@ export class TradingChartController {
   private windowResizeHandler: (() => void) | null = null
   private chartType: ChartType
   private candles: CandleData[] = []
+  private plugins = new Map<string, ChartPlugin>()
 
   constructor(
     private readonly container: HTMLElement,
@@ -81,6 +83,7 @@ export class TradingChartController {
     this.chartType = type
     this.mainSeries = this.createMainSeries(type)
     this.applyDataToSeries()
+    this.plugins.forEach((plugin) => plugin.setData?.(this.candles))
   }
 
   setData(candles: CandleData[], mode: 'replace' | 'merge' = 'replace') {
@@ -114,16 +117,34 @@ export class TradingChartController {
     const formatted = formatCandleForChartType(nextCandle, this.chartType, this.candles)
     this.mainSeries.update(formatted as any)
     this.volumeSeries.update(formatVolumeBar(nextCandle))
+    this.plugins.forEach((plugin) => plugin.onBar?.(nextCandle, this.candles))
   }
 
   clearData() {
     this.candles = []
     this.mainSeries?.setData([])
     this.volumeSeries?.setData([])
+    this.plugins.forEach((plugin) => plugin.setData?.(this.candles))
   }
 
   getData(): readonly CandleData[] {
     return this.candles
+  }
+
+  use(plugin: ChartPlugin) {
+    if (this.plugins.has(plugin.id)) return
+    const context = this.getPluginContext()
+    if (!context) return
+    this.plugins.set(plugin.id, plugin)
+    plugin.initialize(context)
+    plugin.setData?.(this.candles)
+  }
+
+  removePlugin(pluginId: string) {
+    const plugin = this.plugins.get(pluginId)
+    if (!plugin) return
+    plugin.destroy()
+    this.plugins.delete(pluginId)
   }
 
   applyTheme() {
@@ -163,6 +184,8 @@ export class TradingChartController {
       window.removeEventListener('resize', this.windowResizeHandler)
       this.windowResizeHandler = null
     }
+    this.plugins.forEach((plugin) => plugin.destroy())
+    this.plugins.clear()
     this.chart?.remove()
     this.chart = null
     this.mainSeries = null
@@ -214,6 +237,15 @@ export class TradingChartController {
     if (!this.mainSeries || !this.volumeSeries) return
     this.mainSeries.setData(formatDataForChartType(this.candles, this.chartType) as any)
     this.volumeSeries.setData(formatVolumeData(this.candles))
+  }
+
+  private getPluginContext(): ChartPluginContext | null {
+    if (!this.chart || !this.mainSeries) return null
+    return {
+      chart: this.chart,
+      mainSeries: this.mainSeries,
+      getData: () => this.candles,
+    }
   }
 }
 

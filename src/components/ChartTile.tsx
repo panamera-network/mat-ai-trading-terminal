@@ -24,11 +24,11 @@ import TradeJournal from './TradeJournal'
 import MultiTimeframePanel from './MultiTimeframePanel'
 import KeyboardHelpModal from './KeyboardHelpModal'
 import IndicatorsModal from './IndicatorsModal'
-import IndicatorOverlay from './IndicatorOverlay'
 import IndicatorPanel from './IndicatorPanel'
 import VolumeProfileIndicator from './VolumeProfileIndicator'
 import PluginDrawingLayer from './PluginDrawingLayer'
 import { TradingChartController } from '@/core/chart/TradingChartController'
+import { IndicatorOverlayPlugin } from '@/core/indicators/IndicatorOverlayPlugin'
 
 interface ChartTileProps {
   chartId: string
@@ -45,6 +45,7 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
   const seriesRef = useRef<ISeriesApi<any> | null>(null)
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const controllerRef = useRef<TradingChartController | null>(null)
+  const indicatorOverlayPluginRef = useRef<IndicatorOverlayPlugin | null>(null)
   const isDrawingInteractionRef = useRef(false)
   const followRealtimeRef = useRef(true)
   const [chartApi, setChartApi] = useState<IChartApi | null>(null)
@@ -140,6 +141,9 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
     seriesRef.current = series
     volumeSeriesRef.current = runtime.volumeSeries
     controllerRef.current = controller
+    const indicatorOverlayPlugin = new IndicatorOverlayPlugin()
+    controller.use(indicatorOverlayPlugin)
+    indicatorOverlayPluginRef.current = indicatorOverlayPlugin
     setChartApi(chartApi)
     setMainSeries(series)
 
@@ -153,6 +157,7 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
       chartApi.timeScale().unsubscribeVisibleLogicalRangeChange(updateFollowRealtime)
       controller.destroy()
       controllerRef.current = null
+      indicatorOverlayPluginRef.current = null
       chartRef.current = null
       seriesRef.current = null
       volumeSeriesRef.current = null
@@ -246,6 +251,10 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
   const panelIndicators = chart.indicators.filter((i) => i.type === 'panel' && i.visible)
   const volumeProfileIndicator = chart.indicators.find((i) => i.type === 'volume-profile' && i.visible)
 
+  useEffect(() => {
+    indicatorOverlayPluginRef.current?.setIndicators(overlayIndicators)
+  }, [overlayIndicators])
+
   return (
     <div className={`relative flex flex-col border ${isActive ? 'border-blue-500' : 'border-gray-800'} bg-chart-bg overflow-hidden`} onClick={() => setActiveChart(chartId)}>
       {/* Chart panel header */}
@@ -309,14 +318,6 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
             )}
             {chartApi && mainSeries && <PositionLines chart={chartApi} series={mainSeries as any} symbol={chart.symbol} />}
             <ChartContextMenu chart={chartApi} series={mainSeries} symbol={chart.symbol} bid={bid} ask={ask} spread={spread} />
-            {chartApi && mainSeries && (
-              <IndicatorOverlay
-                chart={chartApi}
-                candleSeries={mainSeries as any}
-                data={chart.data}
-                indicators={overlayIndicators}
-              />
-            )}
             {chartApi && mainSeries && volumeProfileIndicator && (
               <VolumeProfileIndicator
                 chart={chartApi}
