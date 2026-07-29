@@ -1,12 +1,7 @@
 import { useRef, useEffect, useState, useCallback } from 'react'
 import {
-  AreaSeries,
-  CandlestickSeries,
-  createChart,
-  HistogramSeries,
   IChartApi,
   ISeriesApi,
-  LineSeries,
   Time,
   HistogramData,
 } from 'lightweight-charts'
@@ -36,6 +31,7 @@ import IndicatorOverlay from './IndicatorOverlay'
 import IndicatorPanel from './IndicatorPanel'
 import VolumeProfileIndicator from './VolumeProfileIndicator'
 import PluginDrawingLayer from './PluginDrawingLayer'
+import { TradingChartController } from '@/core/chart/TradingChartController'
 
 interface ChartTileProps {
   chartId: string
@@ -51,6 +47,7 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<any> | null>(null)
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
+  const controllerRef = useRef<TradingChartController | null>(null)
   const lastSeriesTimeRef = useRef<number | null>(null)
   const isDrawingInteractionRef = useRef(false)
   const followRealtimeRef = useRef(true)
@@ -134,85 +131,21 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
     return () => window.removeEventListener('keydown', handleKey)
   }, [])
 
-  // Chart type switching
-  const createSeries = useCallback((chartApi: IChartApi, type: ChartType) => {
-    if (seriesRef.current) {
-      chartApi.removeSeries(seriesRef.current)
-      seriesRef.current = null
-      lastSeriesTimeRef.current = null
-    }
-    switch (type) {
-      case 'candlestick':
-        return chartApi.addSeries(CandlestickSeries, {
-          upColor: '#26a69a', downColor: '#ef5350',
-          borderUpColor: '#26a69a', borderDownColor: '#ef5350',
-          wickUpColor: '#26a69a', wickDownColor: '#ef5350',
-        })
-      case 'line':
-        return chartApi.addSeries(LineSeries, { color: '#2962FF', lineWidth: 2 })
-      case 'area':
-        return chartApi.addSeries(AreaSeries, {
-          lineColor: '#2962FF', topColor: 'rgba(41, 98, 255, 0.4)',
-          bottomColor: 'rgba(41, 98, 255, 0.05)',
-        })
-      case 'heikin-ashi':
-        return chartApi.addSeries(CandlestickSeries, {
-          upColor: '#26a69a', downColor: '#ef5350',
-          borderUpColor: '#26a69a', borderDownColor: '#ef5350',
-          wickUpColor: '#26a69a', wickDownColor: '#ef5350',
-        })
-      default:
-        return chartApi.addSeries(CandlestickSeries, {
-          upColor: '#26a69a', downColor: '#ef5350',
-          borderUpColor: '#26a69a', borderDownColor: '#ef5350',
-          wickUpColor: '#26a69a', wickDownColor: '#ef5350',
-        })
-    }
-  }, [])
-
   // Initialize chart
   useEffect(() => {
     if (!containerRef.current) return
-    const chartApi = createChart(containerRef.current, {
-      layout: { background: { color: '#1e222d' }, textColor: '#d1d4dc' },
-      grid: { vertLines: { color: '#2B2B43' }, horzLines: { color: '#2B2B43' } },
-      crosshair: { mode: 1 },
-      rightPriceScale: { borderColor: '#2B2B43' },
-      timeScale: { borderColor: '#2B2B43' },
-      handleScroll: {
-        mouseWheel: true,
-        pressedMouseMove: true,
-        horzTouchDrag: true,
-        vertTouchDrag: false,
-      },
-      handleScale: {
-        axisPressedMouseMove: true,
-        mouseWheel: true,
-        pinch: true,
-      },
-    })
-    const series = createSeries(chartApi, chart.chartType)
+    const controller = new TradingChartController(containerRef.current, { chartType: chart.chartType })
+    controller.initialize()
+    const runtime = controller.getUnsafeLightweightRuntime()
+    if (!runtime) return
+    const chartApi = runtime.chart
+    const series = runtime.mainSeries
     chartRef.current = chartApi
     seriesRef.current = series
+    volumeSeriesRef.current = runtime.volumeSeries
+    controllerRef.current = controller
     setChartApi(chartApi)
     setMainSeries(series)
-
-    const volumeSeries = chartApi.addSeries(HistogramSeries, {
-      priceFormat: { type: 'volume' },
-      priceScaleId: 'volume',
-    })
-    volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } })
-    volumeSeriesRef.current = volumeSeries
-
-    const handleResize = () => {
-      if (containerRef.current) {
-        chartApi.applyOptions({ width: containerRef.current.clientWidth, height: containerRef.current.clientHeight })
-      }
-    }
-    const resizeObserver = new ResizeObserver(handleResize)
-    resizeObserver.observe(containerRef.current)
-    window.addEventListener('resize', handleResize)
-    handleResize()
 
     const updateFollowRealtime = () => {
       const scrollPosition = chartApi.timeScale().scrollPosition()
@@ -222,9 +155,8 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
 
     return () => {
       chartApi.timeScale().unsubscribeVisibleLogicalRangeChange(updateFollowRealtime)
-      resizeObserver.disconnect()
-      window.removeEventListener('resize', handleResize)
-      chartApi.remove()
+      controller.destroy()
+      controllerRef.current = null
       chartRef.current = null
       seriesRef.current = null
       volumeSeriesRef.current = null
@@ -235,10 +167,14 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
 
   // Handle chart type change
   useEffect(() => {
-    if (!chartRef.current) return
-    const series = createSeries(chartRef.current, chart.chartType)
+    if (!controllerRef.current) return
+    controllerRef.current.setSeriesType(chart.chartType)
+    const runtime = controllerRef.current.getUnsafeLightweightRuntime()
+    if (!runtime) return
+    const series = runtime.mainSeries
     seriesRef.current = series
     setMainSeries(series)
+    lastSeriesTimeRef.current = null
     if (chart.data.length > 0) {
       const orderedData = normalizeChartData(chart.data)
       const formatted = formatDataForChartType(orderedData, chart.chartType)
