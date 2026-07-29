@@ -2,8 +2,6 @@ import { useRef, useEffect, useState, useCallback } from 'react'
 import {
   IChartApi,
   ISeriesApi,
-  Time,
-  HistogramData,
 } from 'lightweight-charts'
 import { X } from 'lucide-react'
 import { useLayoutStore } from '@/stores/layoutStore'
@@ -14,7 +12,6 @@ import { useStrategyRunner } from '@/hooks/useStrategyRunner'
 import { useKeyboardShortcuts } from '@/hooks/useKeyboardShortcuts'
 import { useOrderStore } from '@/stores/orderStore'
 import { alertsService } from '@/services/alertsService'
-import { ChartType } from '@/types'
 import type { ChartPanelToggles } from '@/components/TradingTerminal'
 import OrderPanel from './OrderPanel'
 import DOMPanel from './DOMPanel'
@@ -48,7 +45,6 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
   const seriesRef = useRef<ISeriesApi<any> | null>(null)
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const controllerRef = useRef<TradingChartController | null>(null)
-  const lastSeriesTimeRef = useRef<number | null>(null)
   const isDrawingInteractionRef = useRef(false)
   const followRealtimeRef = useRef(true)
   const [chartApi, setChartApi] = useState<IChartApi | null>(null)
@@ -174,33 +170,28 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
     const series = runtime.mainSeries
     seriesRef.current = series
     setMainSeries(series)
-    lastSeriesTimeRef.current = null
-    if (chart.data.length > 0) {
-      const orderedData = normalizeChartData(chart.data)
-      const formatted = formatDataForChartType(orderedData, chart.chartType)
-      series.setData(formatted as any)
-      volumeSeriesRef.current?.setData(formatVolumeData(orderedData))
-      lastSeriesTimeRef.current = getTimeOrderValue(orderedData[orderedData.length - 1]?.time)
-    }
   }, [chart.chartType])
 
   // Live mode: update from store
   useEffect(() => {
-    if (isBacktestMode || !seriesRef.current || chart.data.length === 0) return
-    const orderedData = normalizeChartData(chart.data)
-    const lastCandle = orderedData[orderedData.length - 1]
-    const lastTime = getTimeOrderValue(lastCandle?.time)
-    if (lastTime === null) return
-
-    if (lastSeriesTimeRef.current !== null && lastTime < lastSeriesTimeRef.current) {
-      seriesRef.current.setData(formatDataForChartType(orderedData, chart.chartType) as any)
-      volumeSeriesRef.current?.setData(formatVolumeData(orderedData))
-    } else {
-      const formatted = formatCandleForChartType(lastCandle, chart.chartType, orderedData)
-      seriesRef.current.update(formatted as any)
-      volumeSeriesRef.current?.update(formatVolumeBar(lastCandle))
+    const controller = controllerRef.current
+    if (isBacktestMode || !controller) return
+    if (chart.data.length === 0) {
+      controller.clearData()
+      return
     }
-    lastSeriesTimeRef.current = lastTime
+
+    const runtimeDataLength = controller.getData().length
+    if (runtimeDataLength === 0 || chart.data.length > runtimeDataLength + 1 || chart.data.length < runtimeDataLength) {
+      controller.setData(chart.data, 'replace')
+    } else {
+      controller.updateBar(chart.data[chart.data.length - 1], 'live')
+    }
+
+    const runtimeData = controller.getData()
+    const lastCandle = runtimeData[runtimeData.length - 1]
+    if (!lastCandle) return
+
     if (chartRef.current && followRealtimeRef.current && !isDrawingInteractionRef.current) {
       chartRef.current.timeScale().scrollToRealTime()
     }
@@ -209,21 +200,22 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
     const bid = lastCandle.close - 0.0001
     const ask = lastCandle.close + 0.0001
     alertsService.checkAlerts(chart.symbol.id, bid, ask)
-  }, [chart.data, isBacktestMode, chart.chartType, chart.symbol.id])
+  }, [chart.data, isBacktestMode, chart.symbol.id])
 
   // Backtest mode: display historical data
   useEffect(() => {
-    if (!isBacktestMode || !seriesRef.current || !backtestState) return
+    const controller = controllerRef.current
+    if (!isBacktestMode || !controller || !backtestState) return
     const cursor = backtestState.cursor
     const dataToShow = backtestData.slice(0, cursor + 1)
-    if (dataToShow.length === 0) return
-    const formatted = formatDataForChartType(dataToShow as any, chart.chartType)
+    if (dataToShow.length === 0) {
+      controller.clearData()
+      return
+    }
     if (cursor < 5 || cursor % 10 === 0) {
-      seriesRef.current.setData(formatted as any)
-      volumeSeriesRef.current?.setData(formatVolumeData(dataToShow as any))
+      controller.setData(dataToShow as any, 'replace')
     } else {
-      seriesRef.current.update(formatted[formatted.length - 1] as any)
-      volumeSeriesRef.current?.update(formatVolumeBar(dataToShow[dataToShow.length - 1] as any))
+      controller.updateBar(dataToShow[dataToShow.length - 1] as any, 'backtest')
     }
 
     // Check alerts in backtest
@@ -363,97 +355,4 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
       <KeyboardHelpModal isOpen={showHelp} onClose={() => setShowHelp(false)} />
     </div>
   )
-}
-
-// ─── Data Format Helpers ───
-
-function formatDataForChartType(data: any[], type: ChartType): any[] {
-  switch (type) {
-    case 'candlestick':
-      return data.map((d) => ({ time: d.time as Time, open: d.open, high: d.high, low: d.low, close: d.close }))
-    case 'line':
-      return data.map((d) => ({ time: d.time as Time, value: d.close }))
-    case 'area':
-      return data.map((d) => ({ time: d.time as Time, value: d.close }))
-    case 'heikin-ashi':
-      return calculateHeikinAshi(data)
-    default:
-      return data.map((d) => ({ time: d.time as Time, open: d.open, high: d.high, low: d.low, close: d.close }))
-  }
-}
-
-function getTimeOrderValue(time: unknown): number | null {
-  if (typeof time === 'number') return time
-  if (typeof time === 'string') {
-    const parsed = Date.parse(time)
-    return Number.isNaN(parsed) ? null : Math.floor(parsed / 1000)
-  }
-  if (time && typeof time === 'object') {
-    const maybeDate = time as { year?: unknown; month?: unknown; day?: unknown }
-    if (
-      typeof maybeDate.year === 'number' &&
-      typeof maybeDate.month === 'number' &&
-      typeof maybeDate.day === 'number'
-    ) {
-      return Date.UTC(maybeDate.year, maybeDate.month - 1, maybeDate.day) / 1000
-    }
-  }
-  return null
-}
-
-function normalizeChartData<T extends { time: unknown }>(data: T[]): T[] {
-  const byTime = new Map<number, T>()
-  for (const item of data) {
-    const orderTime = getTimeOrderValue(item.time)
-    if (orderTime === null) continue
-    byTime.set(orderTime, item)
-  }
-  return Array.from(byTime.entries())
-    .sort(([a], [b]) => a - b)
-    .map(([, item]) => item)
-}
-
-function formatVolumeData(data: any[]): HistogramData[] {
-  return data.map((d) => ({
-    time: d.time as Time,
-    value: d.volume,
-    color: d.close >= d.open ? '#26a69a80' : '#ef535080',
-  }))
-}
-
-function formatVolumeBar(candle: any): HistogramData {
-  return {
-    time: candle.time as Time,
-    value: candle.volume,
-    color: candle.close >= candle.open ? '#26a69a80' : '#ef535080',
-  }
-}
-
-function formatCandleForChartType(candle: any, type: ChartType, allData: any[]): any {
-  switch (type) {
-    case 'candlestick':
-      return { time: candle.time as Time, open: candle.open, high: candle.high, low: candle.low, close: candle.close }
-    case 'line': case 'area':
-      return { time: candle.time as Time, value: candle.close }
-    case 'heikin-ashi':
-      const ha = calculateHeikinAshi([...allData.slice(-2), candle])
-      return ha[ha.length - 1]
-    default:
-      return { time: candle.time as Time, open: candle.open, high: candle.high, low: candle.low, close: candle.close }
-  }
-}
-
-function calculateHeikinAshi(data: any[]): any[] {
-  const ha: any[] = []
-  let prevHA: any = null
-  for (const candle of data) {
-    const close = (candle.open + candle.high + candle.low + candle.close) / 4
-    const open = prevHA ? (prevHA.open + prevHA.close) / 2 : (candle.open + candle.close) / 2
-    const high = Math.max(candle.high, open, close)
-    const low = Math.min(candle.low, open, close)
-    const haCandle = { time: candle.time as Time, open, high, low, close }
-    ha.push(haCandle)
-    prevHA = haCandle
-  }
-  return ha
 }
