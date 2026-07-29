@@ -227,7 +227,7 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
     if (cursor < 5 || cursor % 10 === 0) {
       controller.setData(dataToShow as any, 'replace')
     } else {
-      controller.updateBar(dataToShow[dataToShow.length - 1] as any, 'backtest')
+      controller.updateBar(dataToShow[dataToShow.length - 1] as any, 'replay')
     }
 
     // Check alerts in backtest

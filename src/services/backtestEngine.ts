@@ -3,10 +3,13 @@ import { CandleData } from '@/types'
 import { Symbol } from '@/types/market'
 import { orderService } from '@/services/orderService'
 import { Order, Position, Trade } from '@/types/order'
+import { ReplayController, ReplayEvent, ReplayState } from '@/core/replay/ReplayController'
 
 export class BacktestEngine {
   private data: HistoricalCandle[] = []
   private config: BacktestConfig | null = null
+  private replay = new ReplayController<HistoricalCandle>()
+  private unsubscribeReplay: (() => void) | null = null
   private state: BacktestState = {
     isPlaying: false,
     isComplete: false,
@@ -16,7 +19,6 @@ export class BacktestEngine {
     currentCandle: null,
     currentDate: null,
   }
-  private interval: ReturnType<typeof setInterval> | null = null
   private onTick: ((candle: HistoricalCandle) => void) | null = null
   private onComplete: ((result: BacktestResult) => void) | null = null
   private onStateChange: ((state: BacktestState) => void) | null = null
@@ -25,6 +27,10 @@ export class BacktestEngine {
   private peakBalance = 0
   private maxDrawdown = 0
   private maxDrawdownPercent = 0
+
+  constructor() {
+    this.unsubscribeReplay = this.replay.subscribe((event) => this.handleReplayEvent(event))
+  }
 
   loadData(data: HistoricalCandle[], config: BacktestConfig) {
     this.data = data
@@ -35,114 +41,50 @@ export class BacktestEngine {
     this.maxDrawdownPercent = 0
     this.equityHistory = []
 
-    this.state = {
-      isPlaying: false,
-      isComplete: false,
-      cursor: 0,
-      totalCandles: data.length,
-      speed: 1,
-      currentCandle: data[0] || null,
-      currentDate: data[0] ? new Date(data[0].time * 1000) : null,
-    }
-
     // Reset order service
     orderService.reset()
-
-    this.emitState()
+    this.replay.load(data)
+    this.data = [...this.replay.getData()]
   }
 
   play() {
-    if (this.state.isPlaying || this.state.isComplete) return
-    this.state.isPlaying = true
-    this.emitState()
-
-    const tickMs = Math.max(16, 1000 / this.state.speed / 60) // 60fps base
-
-    this.interval = setInterval(() => {
-      this.step()
-    }, tickMs)
+    this.replay.play()
   }
 
   pause() {
-    if (!this.state.isPlaying) return
-    this.state.isPlaying = false
-    if (this.interval) {
-      clearInterval(this.interval)
-      this.interval = null
-    }
-    this.emitState()
+    this.replay.pause()
   }
 
   stop() {
-    this.pause()
-    this.state.cursor = 0
-    this.state.isComplete = false
-    this.state.currentCandle = this.data[0] || null
-    this.state.currentDate = this.data[0] ? new Date(this.data[0].time * 1000) : null
     this.balance = this.config?.initialBalance || 0
+    this.peakBalance = this.config?.initialBalance || 0
+    this.maxDrawdown = 0
+    this.maxDrawdownPercent = 0
     this.equityHistory = []
     orderService.reset()
-    this.emitState()
+    this.replay.reset()
   }
 
   step() {
-    if (this.state.cursor >= this.data.length - 1) {
-      this.complete()
-      return
-    }
-
-    this.state.cursor++
-    const candle = this.data[this.state.cursor]
-    this.state.currentCandle = candle
-    this.state.currentDate = new Date(candle.time * 1000)
-
-    // Process orders at this candle
-    this.processCandle(candle)
-
-    // Update equity
-    this.updateEquity(candle)
-
-    // Emit tick
-    this.onTick?.(candle)
-    this.emitState()
+    this.replay.stepForward()
   }
 
   stepBack() {
-    if (this.state.cursor <= 0) return
-    this.pause()
-    this.state.cursor--
-    const candle = this.data[this.state.cursor]
-    this.state.currentCandle = candle
-    this.state.currentDate = new Date(candle.time * 1000)
-
-    // Recalculate from scratch (simpler than reverse)
-    this.recalculateFromStart()
-
-    this.onTick?.(candle)
-    this.emitState()
+    this.replay.stepBackward()
   }
 
   seekTo(cursor: number) {
-    if (cursor < 0 || cursor >= this.data.length) return
-    this.pause()
-    this.state.cursor = cursor
-    const candle = this.data[cursor]
-    this.state.currentCandle = candle
-    this.state.currentDate = new Date(candle.time * 1000)
-
-    this.recalculateFromStart()
-
-    this.onTick?.(candle)
-    this.emitState()
+    this.replay.seekTo(cursor)
   }
 
   setSpeed(speed: number) {
-    this.state.speed = speed
-    if (this.state.isPlaying) {
-      this.pause()
-      this.play()
-    }
-    this.emitState()
+    this.replay.setSpeed(speed)
+  }
+
+  destroy() {
+    this.unsubscribeReplay?.()
+    this.unsubscribeReplay = null
+    this.replay.destroy()
   }
 
   private processCandle(candle: HistoricalCandle) {
@@ -227,10 +169,6 @@ export class BacktestEngine {
   }
 
   private complete() {
-    this.pause()
-    this.state.isComplete = true
-    this.state.isPlaying = false
-
     const result = this.calculateResult()
     this.onComplete?.(result)
     this.emitState()
@@ -295,6 +233,41 @@ export class BacktestEngine {
 
   private emitState() {
     this.onStateChange?.({ ...this.state })
+  }
+
+  private handleReplayEvent(event: ReplayEvent<HistoricalCandle>) {
+    this.syncStateFromReplay(event.state)
+
+    if (event.type === 'step') {
+      if (event.reason === 'forward' && event.state.cursor > event.previousCursor) {
+        this.processCandle(event.candle)
+        this.updateEquity(event.candle)
+      } else {
+        this.recalculateFromStart()
+      }
+      this.onTick?.(event.candle)
+      this.emitState()
+      return
+    }
+
+    if (event.type === 'completed') {
+      this.complete()
+      return
+    }
+
+    this.emitState()
+  }
+
+  private syncStateFromReplay(replayState: ReplayState<HistoricalCandle>) {
+    this.state = {
+      isPlaying: replayState.isPlaying,
+      isComplete: replayState.isComplete,
+      cursor: replayState.cursor,
+      totalCandles: replayState.totalCandles,
+      speed: replayState.speed,
+      currentCandle: replayState.currentCandle,
+      currentDate: replayState.currentCandle ? new Date(replayState.currentCandle.time * 1000) : null,
+    }
   }
 
   subscribe(callbacks: {

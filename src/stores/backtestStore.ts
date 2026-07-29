@@ -91,3 +91,8 @@ export const useBacktestStore = create<BacktestStore>((set, get) => ({
     set({ config: null, state: null, result: null, data: [] })
   },
 }))
+
+backtestEngine.subscribe({
+  onStateChange: (state) => useBacktestStore.setState({ state }),
+  onComplete: (result) => useBacktestStore.setState({ result }),
+})
