@@ -9,6 +9,8 @@ import {
   SeriesType,
   Time,
   HistogramData,
+  LogicalRange,
+  MouseEventParams,
 } from 'lightweight-charts'
 import { CandleData, ChartType } from '@/types'
 import { ChartPlugin, ChartPluginContext } from '@/core/chart/ChartPlugin'
@@ -24,6 +26,14 @@ export interface TradingChartRuntimeUnsafe {
 }
 
 export type TradingChartBarSource = 'live' | 'replay' | 'backtest'
+
+export interface TradingChartCrosshairPosition {
+  time: Time
+  price: number
+}
+
+export type TradingChartCrosshairMoveHandler = (position: TradingChartCrosshairPosition | null) => void
+export type TradingChartVisibleRangeHandler = (range: LogicalRange | null) => void
 
 export class TradingChartController {
   private chart: IChartApi | null = null
@@ -130,6 +140,49 @@ export class TradingChartController {
 
   getData(): readonly CandleData[] {
     return this.candles
+  }
+
+  subscribeCrosshairMove(handler: TradingChartCrosshairMoveHandler): () => void {
+    if (!this.chart || !this.mainSeries) return () => undefined
+
+    const chart = this.chart
+    const listener = (param: MouseEventParams<Time>) => {
+      const mainSeries = this.mainSeries
+      if (!param.point || !param.time) {
+        handler(null)
+        return
+      }
+      if (!mainSeries) {
+        handler(null)
+        return
+      }
+
+      const price = getCrosshairSeriesPrice(param.seriesData.get(mainSeries))
+      handler(price === null ? null : { time: param.time, price })
+    }
+
+    chart.subscribeCrosshairMove(listener)
+    return () => chart.unsubscribeCrosshairMove(listener)
+  }
+
+  subscribeVisibleLogicalRangeChange(handler: TradingChartVisibleRangeHandler): () => void {
+    if (!this.chart) return () => undefined
+    const timeScale = this.chart.timeScale()
+    timeScale.subscribeVisibleLogicalRangeChange(handler)
+    return () => timeScale.unsubscribeVisibleLogicalRangeChange(handler)
+  }
+
+  setExternalCrosshair(position: TradingChartCrosshairPosition) {
+    if (!this.chart || !this.mainSeries) return
+    this.chart.setCrosshairPosition(position.price, position.time, this.mainSeries)
+  }
+
+  clearExternalCrosshair() {
+    this.chart?.clearCrosshairPosition()
+  }
+
+  setVisibleLogicalRange(range: LogicalRange) {
+    this.chart?.timeScale().setVisibleLogicalRange(range)
   }
 
   use(plugin: ChartPlugin) {
@@ -372,4 +425,12 @@ function calculateHeikinAshi(data: CandleData[]): any[] {
     prevHA = haCandle
   }
   return ha
+}
+
+function getCrosshairSeriesPrice(data: unknown): number | null {
+  if (!data || typeof data !== 'object') return null
+  const item = data as { close?: unknown; value?: unknown }
+  if (typeof item.close === 'number') return item.close
+  if (typeof item.value === 'number') return item.value
+  return null
 }

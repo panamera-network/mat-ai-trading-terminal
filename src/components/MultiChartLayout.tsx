@@ -1,6 +1,8 @@
+import { useEffect, useRef } from 'react'
 import { useLayoutStore } from '@/stores/layoutStore'
 import type { ChartPanelToggles } from '@/components/TradingTerminal'
 import ChartTile from './ChartTile'
+import { TradingChartSyncEngine } from '@/core/sync/TradingChartSyncEngine'
 
 const LAYOUT_GRID: Record<string, string> = {
   '1x1': 'grid-cols-1 grid-rows-1',
@@ -20,6 +22,28 @@ interface MultiChartLayoutProps {
 export default function MultiChartLayout({ activeTool, onToolSelect, chartPanels, onChartPanelClose }: MultiChartLayoutProps) {
   const { layout } = useLayoutStore()
   const gridClass = LAYOUT_GRID[layout.type] || LAYOUT_GRID['1x1']
+  const syncEngineRef = useRef<TradingChartSyncEngine | null>(null)
+
+  if (!syncEngineRef.current) {
+    syncEngineRef.current = new TradingChartSyncEngine({
+      syncCrosshair: layout.syncCrosshair,
+      syncSymbol: layout.syncSymbol,
+      syncTimeframe: layout.syncTimeframe,
+    })
+  }
+
+  useEffect(() => {
+    syncEngineRef.current?.setGroupOptions({
+      syncCrosshair: layout.syncCrosshair,
+      syncSymbol: layout.syncSymbol,
+      syncTimeframe: layout.syncTimeframe,
+    })
+  }, [layout.syncCrosshair, layout.syncSymbol, layout.syncTimeframe])
+
+  useEffect(() => {
+    const syncEngine = syncEngineRef.current
+    return () => syncEngine?.destroy()
+  }, [])
 
   return (
     <div className={`h-full w-full grid ${gridClass} gap-1 bg-chart-bg`}>
@@ -32,6 +56,7 @@ export default function MultiChartLayout({ activeTool, onToolSelect, chartPanels
           onToolSelect={onToolSelect}
           chartPanels={chartPanels}
           onChartPanelClose={onChartPanelClose}
+          syncEngine={syncEngineRef.current}
         />
       ))}
     </div>

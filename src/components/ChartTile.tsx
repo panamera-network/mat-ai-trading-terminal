@@ -29,6 +29,7 @@ import VolumeProfileIndicator from './VolumeProfileIndicator'
 import PluginDrawingLayer from './PluginDrawingLayer'
 import { TradingChartController } from '@/core/chart/TradingChartController'
 import { IndicatorOverlayPlugin } from '@/core/indicators/IndicatorOverlayPlugin'
+import { TradingChartSyncEngine } from '@/core/sync/TradingChartSyncEngine'
 
 interface ChartTileProps {
   chartId: string
@@ -37,9 +38,10 @@ interface ChartTileProps {
   onToolSelect: (tool: string) => void
   chartPanels: ChartPanelToggles
   onChartPanelClose: (panel: keyof ChartPanelToggles) => void
+  syncEngine: TradingChartSyncEngine | null
 }
 
-export default function ChartTile({ chartId, isActive, activeTool, onToolSelect, chartPanels, onChartPanelClose }: ChartTileProps) {
+export default function ChartTile({ chartId, isActive, activeTool, onToolSelect, chartPanels, onChartPanelClose, syncEngine }: ChartTileProps) {
   const containerRef = useRef<HTMLDivElement | null>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const seriesRef = useRef<ISeriesApi<any> | null>(null)
@@ -67,7 +69,12 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
 
   const placeOrder = useOrderStore((s) => s.placeOrder)
 
-  useSyncCrosshair(chartRef.current, chartId)
+  useSyncCrosshair(syncEngine, {
+    chartId,
+    controller: controllerRef.current,
+    getSymbol: () => useLayoutStore.getState().layout.charts.find((c) => c.id === chartId)?.symbol || chart.symbol,
+    getTimeframe: () => useLayoutStore.getState().layout.charts.find((c) => c.id === chartId)?.timeframe || chart.timeframe,
+  })
 
   const setContainerRef = useCallback((node: HTMLDivElement | null) => {
     containerRef.current = node
