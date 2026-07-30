@@ -14,6 +14,7 @@ interface PluginDrawingLayerProps {
   onToolSelect: (tool: string) => void
   onDrawingInteractionChange?: (isInteracting: boolean) => void
   persistenceScope: DrawingPersistenceScope
+  magnetEnabled: boolean
 }
 
 export function isPluginDrawingTool(tool: DrawingType | string): boolean {
@@ -27,6 +28,7 @@ export default function PluginDrawingLayer({
   onToolSelect,
   onDrawingInteractionChange,
   persistenceScope,
+  magnetEnabled,
 }: PluginDrawingLayerProps) {
   const pluginRef = useRef<DrawingRuntimePlugin | null>(null)
 
@@ -37,6 +39,7 @@ export default function PluginDrawingLayer({
       onToolSelect,
       onDrawingInteractionChange,
       persistenceScope,
+      magnetEnabled,
     })
     pluginRef.current = plugin
     controller.use(plugin)
@@ -61,6 +64,10 @@ export default function PluginDrawingLayer({
   useEffect(() => {
     pluginRef.current?.setPersistenceScope(persistenceScope)
   }, [persistenceScope])
+
+  useEffect(() => {
+    pluginRef.current?.setMagnetEnabled(magnetEnabled)
+  }, [magnetEnabled])
 
   return null
 }

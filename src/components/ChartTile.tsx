@@ -57,6 +57,7 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
 
   const chart = useLayoutStore((s) => s.layout.charts.find((c) => c.id === chartId)!)
   const layoutType = useLayoutStore((s) => s.layout.type)
+  const magnetMode = useLayoutStore((s) => s.magnetMode)
   const updateChart = useLayoutStore((s) => s.updateChart)
   const setActiveChart = useLayoutStore((s) => s.setActiveChart)
   const removeChart = useLayoutStore((s) => s.removeChart)
@@ -329,6 +330,7 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
                   isDrawingInteractionRef.current = isInteracting
                 }}
                 persistenceScope={drawingPersistenceScope}
+                magnetEnabled={magnetMode}
               />
             )}
             {chartApi && mainSeries && <PositionLines chart={chartApi} series={mainSeries as any} symbol={chart.symbol} />}

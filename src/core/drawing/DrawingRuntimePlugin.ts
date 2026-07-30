@@ -6,13 +6,19 @@ import {
   type IDrawing,
 } from 'lightweight-charts-drawing'
 import { ChartPlugin, ChartPluginContext } from '@/core/chart/ChartPlugin'
-import { DrawingType } from '@/types'
+import { CandleData, DrawingType } from '@/types'
 import { DrawingModel, DrawingPersistenceScope } from '@/core/drawing/DrawingModel'
 import { DrawingPersistenceEngine } from '@/core/drawing/DrawingPersistenceEngine'
 import {
   drawingModelToRuntimeDrawing,
   serializeRuntimeDrawings,
 } from '@/core/drawing/DrawingSerializer'
+import {
+  DrawingSnapEngine,
+  normalizeSnapTime,
+  SnapAxis,
+  SnapMode,
+} from '@/core/drawing/DrawingSnapEngine'
 
 interface DrawingRuntimePluginOptions {
   container: HTMLElement
@@ -20,6 +26,7 @@ interface DrawingRuntimePluginOptions {
   onDrawingInteractionChange?: (isInteracting: boolean) => void
   persistenceScope?: DrawingPersistenceScope
   persistenceEngine?: DrawingPersistenceEngine
+  magnetEnabled?: boolean
 }
 
 const TOOL_MAP: Partial<Record<DrawingType, string>> = {
@@ -112,6 +119,10 @@ export class DrawingRuntimePlugin implements ChartPlugin {
   private loadGeneration = 0
   private saveTimer: ReturnType<typeof setTimeout> | null = null
   private isRestoring = false
+  private snapEngine: DrawingSnapEngine | null = null
+  private magnetEnabled = false
+  private shiftSnapEnabled = false
+  private resizeAnchorIndex: number | null = null
   private onToolSelect: (tool: string) => void
   private onDrawingInteractionChange?: (isInteracting: boolean) => void
 
@@ -120,10 +131,17 @@ export class DrawingRuntimePlugin implements ChartPlugin {
     this.onDrawingInteractionChange = options.onDrawingInteractionChange
     this.persistenceEngine = options.persistenceEngine || new DrawingPersistenceEngine()
     this.persistenceScope = options.persistenceScope || null
+    this.magnetEnabled = Boolean(options.magnetEnabled)
   }
 
   initialize(context: ChartPluginContext) {
     this.context = context
+    this.snapEngine = new DrawingSnapEngine({
+      timeToCoordinate: (time) => context.chart.timeScale().timeToCoordinate(time as Time),
+      priceToCoordinate: (price) => context.mainSeries.priceToCoordinate(price),
+    })
+    this.snapEngine.setCandles(context.getData())
+    this.updateSnapEnabled()
     this.manager = new DrawingManager()
     this.manager.attach(context.chart as any, context.mainSeries as any, this.options.container)
     this.attachManagerEvents()
@@ -154,7 +172,16 @@ export class DrawingRuntimePlugin implements ChartPlugin {
   }
 
   setMagnetEnabled(_enabled: boolean) {
-    // Magnet state is intentionally left at the current runtime behavior for this boundary slice.
+    this.magnetEnabled = _enabled
+    this.updateSnapEnabled()
+  }
+
+  setData(candles: readonly CandleData[]) {
+    this.snapEngine?.setCandles(candles)
+  }
+
+  onBar(_candle: CandleData, candles: readonly CandleData[]) {
+    this.snapEngine?.setCandles(candles)
   }
 
   deleteSelected() {
@@ -174,6 +201,7 @@ export class DrawingRuntimePlugin implements ChartPlugin {
     this.removePreview()
     this.pendingAnchors = []
     this.dragStart = null
+    this.resizeAnchorIndex = null
     this.onDrawingInteractionChange?.(false)
     this.setInteractionLocked(false)
   }
@@ -192,6 +220,10 @@ export class DrawingRuntimePlugin implements ChartPlugin {
     this.manager?.detach()
     this.manager = null
     this.context = null
+    this.shiftSnapEnabled = false
+    this.updateSnapEnabled()
+    this.snapEngine?.destroy()
+    this.snapEngine = null
     this.persistenceEngine.destroy()
   }
 
@@ -206,6 +238,7 @@ export class DrawingRuntimePlugin implements ChartPlugin {
       const anchorIndex = manager.hitTestAnchor(this.getLocalPoint(event))
       if (anchorIndex === null) return
 
+      this.resizeAnchorIndex = anchorIndex
       this.setInteractionLocked(true)
       this.onDrawingInteractionChange?.(true)
     }
@@ -215,7 +248,7 @@ export class DrawingRuntimePlugin implements ChartPlugin {
       if (!toolType) return
 
       const tool = this.registry.get(toolType)
-      const anchor = this.pointToAnchor(event)
+      const anchor = this.pointToAnchor(event, 'create', getSnapAxisForTool(toolType))
       if (!tool || !anchor) return
 
       event.preventDefault()
@@ -246,7 +279,7 @@ export class DrawingRuntimePlugin implements ChartPlugin {
       const toolType = TOOL_MAP[this.activeTool as DrawingType]
       if (!toolType || this.pendingAnchors.length === 0) return
 
-      const anchor = this.pointToAnchor(event)
+      const anchor = this.pointToAnchor(event, 'create', getSnapAxisForTool(toolType))
       if (!anchor) return
       event.preventDefault()
       event.stopPropagation()
@@ -257,7 +290,7 @@ export class DrawingRuntimePlugin implements ChartPlugin {
       const toolType = TOOL_MAP[this.activeTool as DrawingType]
       if (!toolType || this.pendingAnchors.length === 0) return
 
-      const anchor = this.pointToAnchor(event)
+      const anchor = this.pointToAnchor(event, 'create', getSnapAxisForTool(toolType))
       if (!anchor) return
 
       event.preventDefault()
@@ -272,7 +305,7 @@ export class DrawingRuntimePlugin implements ChartPlugin {
       if (!toolType) return
 
       const tool = this.registry.get(toolType)
-      const anchor = this.pointToAnchor(event)
+      const anchor = this.pointToAnchor(event, 'create', getSnapAxisForTool(toolType))
       if (!tool || !anchor || tool.requiredAnchors === 1) return
 
       event.preventDefault()
@@ -293,6 +326,12 @@ export class DrawingRuntimePlugin implements ChartPlugin {
     }
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Shift' && !isEditableTarget(event.target)) {
+        this.shiftSnapEnabled = true
+        this.updateSnapEnabled()
+        return
+      }
+
       if (event.key === 'Escape') {
         this.cancelActiveOperation()
         return
@@ -307,32 +346,59 @@ export class DrawingRuntimePlugin implements ChartPlugin {
       this.schedulePersistedSave()
     }
 
+    const handleKeyUp = (event: KeyboardEvent) => {
+      if (event.key !== 'Shift') return
+      this.shiftSnapEnabled = false
+      this.updateSnapEnabled()
+    }
+
     const handleWindowMouseUp = () => {
       if (this.pendingAnchors.length > 0) return
+      this.resizeAnchorIndex = null
       this.restoreChartInteraction()
       this.onDrawingInteractionChange?.(false)
+    }
+
+    const handleResizeMouseMove = (event: MouseEvent) => {
+      const manager = this.manager
+      const selectedDrawing = manager?.getSelectedDrawing()
+      if (!manager || !selectedDrawing || this.resizeAnchorIndex === null) return
+      const anchor = this.pointToAnchor(event, 'resize', getSnapAxisForTool(selectedDrawing.type))
+      if (!anchor) return
+      selectedDrawing.updateAnchor(this.resizeAnchorIndex, anchor)
+    }
+
+    const handleWindowBlur = () => {
+      this.shiftSnapEnabled = false
+      this.updateSnapEnabled()
     }
 
     container.addEventListener('mousedown', handleSelectionMouseDownCapture, true)
     container.addEventListener('mousedown', handleMouseDown)
     container.addEventListener('mousemove', handleMouseMove)
+    container.addEventListener('mousemove', handleResizeMouseMove)
     container.addEventListener('mouseup', handleMouseUp)
     container.addEventListener('click', handleClick)
     window.addEventListener('keydown', handleKeyDown)
+    window.addEventListener('keyup', handleKeyUp)
     window.addEventListener('mouseup', handleWindowMouseUp)
+    window.addEventListener('blur', handleWindowBlur)
 
     this.cleanupListeners = () => {
       container.removeEventListener('mousedown', handleSelectionMouseDownCapture, true)
       container.removeEventListener('mousedown', handleMouseDown)
       container.removeEventListener('mousemove', handleMouseMove)
+      container.removeEventListener('mousemove', handleResizeMouseMove)
       container.removeEventListener('mouseup', handleMouseUp)
       container.removeEventListener('click', handleClick)
       window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keyup', handleKeyUp)
       window.removeEventListener('mouseup', handleWindowMouseUp)
+      window.removeEventListener('blur', handleWindowBlur)
     }
   }
 
-  private pointToAnchor(event: MouseEvent): Anchor | null {
+  private pointToAnchor(event: MouseEvent, mode: SnapMode, axis: SnapAxis): Anchor | null {
     if (!this.context) return null
     const rect = this.options.container.getBoundingClientRect()
     const x = event.clientX - rect.left
@@ -340,7 +406,19 @@ export class DrawingRuntimePlugin implements ChartPlugin {
     const time = this.context.chart.timeScale().coordinateToTime(x)
     const price = this.context.mainSeries.coordinateToPrice(y)
     if (time === null || price === null) return null
-    return { time: time as Time, price }
+    const normalizedTime = normalizeSnapTime(time as Time)
+    if (normalizedTime === null) return { time: time as Time, price }
+    const snapped = this.snapEngine?.snap({
+      time: normalizedTime,
+      price,
+      pointer: { x, y },
+      target: 'ohlc',
+      thresholdPx: 12,
+      mode,
+      axis,
+    })
+    if (!snapped || !snapped.snapped) return { time: time as Time, price }
+    return { time: snapped.time as Time, price: snapped.price }
   }
 
   private getLocalPoint(event: MouseEvent) {
@@ -436,6 +514,10 @@ export class DrawingRuntimePlugin implements ChartPlugin {
 
     this.releaseInteractionLock?.()
     this.releaseInteractionLock = null
+  }
+
+  private updateSnapEnabled() {
+    this.snapEngine?.setEnabled(this.magnetEnabled || this.shiftSnapEnabled)
   }
 
   private attachManagerEvents() {
@@ -551,4 +633,16 @@ function sameScope(a: DrawingPersistenceScope | null, b: DrawingPersistenceScope
 function getDrawingNumericId(id: string): number {
   const match = /^drawing-(\d+)$/.exec(id)
   return match ? Number(match[1]) : 0
+}
+
+function getSnapAxisForTool(runtimeToolType: string): SnapAxis {
+  if (runtimeToolType === 'vertical-line') return 'time'
+  if (runtimeToolType === 'horizontal-line' || runtimeToolType === 'horizontal-ray') return 'price'
+  return 'ohlc'
+}
+
+function isEditableTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false
+  const tagName = target.tagName.toLowerCase()
+  return tagName === 'input' || tagName === 'textarea' || target.isContentEditable
 }
