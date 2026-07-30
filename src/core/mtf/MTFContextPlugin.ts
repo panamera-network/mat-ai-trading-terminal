@@ -6,6 +6,11 @@ import {
   MTFContextStatus,
 } from '@/core/mtf/MTFContextModel'
 import { prepareCandles } from '@/core/mtf/MTFAggregationEngine'
+import {
+  DEFAULT_MTF_RENDER_THEME,
+  MTFContextPrimitive,
+  MTFRenderTheme,
+} from '@/core/mtf/MTFContextPrimitive'
 
 export interface MTFContextPluginSnapshot {
   enabled: boolean
@@ -27,13 +32,19 @@ export class MTFContextPlugin implements ChartPlugin {
   private enabled = false
   private timeframes: Timeframe[] = []
   private columns = new Map<Timeframe, MTFContextColumn>()
+  private context: ChartPluginContext | null = null
+  private primitive: MTFContextPrimitive | null = null
 
-  initialize(_context: ChartPluginContext) {
+  initialize(context: ChartPluginContext) {
+    this.context = context
     this.initialized = true
   }
 
   setEnabled(enabled: boolean) {
+    if (this.enabled === enabled) return
     this.enabled = enabled
+    if (enabled) this.attachRenderer()
+    else this.detachRenderer()
   }
 
   setTimeframes(timeframes: readonly Timeframe[]) {
@@ -51,6 +62,7 @@ export class MTFContextPlugin implements ChartPlugin {
     }
 
     this.timeframes = nextTimeframes
+    this.syncPrimitive()
   }
 
   setContextData(timeframe: Timeframe, candles: readonly CandleData[]) {
@@ -69,6 +81,7 @@ export class MTFContextPlugin implements ChartPlugin {
       status,
       updatedAt: Date.now(),
     })
+    this.syncPrimitive()
   }
 
   updateContextBar(timeframe: Timeframe, candle: CandleData) {
@@ -94,6 +107,7 @@ export class MTFContextPlugin implements ChartPlugin {
       status: 'incomplete',
       updatedAt: Date.now(),
     })
+    this.syncPrimitive()
   }
 
   setStatus(timeframe: Timeframe, status: MTFContextStatus) {
@@ -104,14 +118,23 @@ export class MTFContextPlugin implements ChartPlugin {
       status,
       updatedAt: Date.now(),
     })
+    this.syncPrimitive()
   }
 
   setData() {
-    // Reserved for future replay-aware aggregation. Slice 1 has no renderer.
+    // Reserved for future replay-aware aggregation. Slice 2 renders only injected context data.
   }
 
   onBar() {
-    // Reserved for future replay-aware aggregation. Slice 1 has no renderer.
+    // Reserved for future replay-aware aggregation. Slice 2 renders only injected context data.
+  }
+
+  onThemeChange(theme?: Partial<MTFRenderTheme>) {
+    this.primitive?.setTheme(theme ?? DEFAULT_MTF_RENDER_THEME)
+  }
+
+  onResize() {
+    this.primitive?.resize()
   }
 
   getSnapshot(): MTFContextPluginSnapshot {
@@ -125,13 +148,38 @@ export class MTFContextPlugin implements ChartPlugin {
   }
 
   destroy() {
+    this.detachRenderer()
     this.initialized = false
     this.enabled = false
     this.timeframes = []
     this.columns.clear()
+    this.context = null
   }
 
   isInitialized(): boolean {
     return this.initialized
+  }
+
+  private attachRenderer() {
+    if (!this.context || this.primitive) return
+    this.primitive = new MTFContextPrimitive()
+    this.context.mainSeries.attachPrimitive(this.primitive)
+    this.syncPrimitive()
+  }
+
+  private detachRenderer() {
+    if (!this.context || !this.primitive) {
+      this.primitive = null
+      return
+    }
+
+    try { this.context.mainSeries.detachPrimitive(this.primitive) } catch {}
+    this.primitive = null
+  }
+
+  private syncPrimitive() {
+    if (!this.enabled) return
+    this.attachRenderer()
+    this.primitive?.setColumns(this.getSnapshot().columns)
   }
 }

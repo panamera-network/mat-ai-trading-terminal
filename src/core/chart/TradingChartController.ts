@@ -208,14 +208,18 @@ export class TradingChartController {
       rightPriceScale: { borderColor: '#2B2B43' },
       timeScale: { borderColor: '#2B2B43' },
     })
+    this.plugins.forEach((plugin) => plugin.onThemeChange?.())
   }
 
   resize() {
     if (!this.chart) return
+    const width = this.container.clientWidth
+    const height = this.container.clientHeight
     this.chart.applyOptions({
-      width: this.container.clientWidth,
-      height: this.container.clientHeight,
+      width,
+      height,
     })
+    this.plugins.forEach((plugin) => plugin.onResize?.({ width, height }))
   }
 
   /**

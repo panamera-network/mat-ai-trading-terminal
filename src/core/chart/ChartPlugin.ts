@@ -13,5 +13,7 @@ export interface ChartPlugin {
   initialize: (context: ChartPluginContext) => void
   setData?: (candles: readonly CandleData[]) => void
   onBar?: (candle: CandleData, candles: readonly CandleData[]) => void
+  onThemeChange?: () => void
+  onResize?: (size: { width: number; height: number }) => void
   destroy: () => void
 }
