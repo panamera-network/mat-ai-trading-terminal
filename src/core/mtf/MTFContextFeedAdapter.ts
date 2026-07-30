@@ -7,6 +7,7 @@ import {
 } from '@/core/feed/tradingFeed'
 import { MTFContextStatus } from '@/core/mtf/MTFContextModel'
 import { prepareCandles } from '@/core/mtf/MTFAggregationEngine'
+import { requestMTFHistory } from '@/core/mtf/MTFHistoryClient'
 
 export interface MTFContextRequest {
   chartId: string
@@ -64,13 +65,11 @@ export class SharedMTFContextFeedAdapter implements MTFContextFeed {
       const subscription = this.ensureSubscription(key, request.symbol, timeframe)
       subscription.consumers.set(consumerId, handlers)
 
-      handlers.onStatus(timeframe, subscription.lastCandle ? 'incomplete' : 'loading')
+      handlers.onStatus(timeframe, 'loading')
       if (subscription.lastCandle) {
         handlers.onHistorical(timeframe, [subscription.lastCandle])
-      } else {
-        handlers.onHistorical(timeframe, [])
-        handlers.onStatus(timeframe, 'unavailable')
       }
+      this.requestInitialHistory(subscription, consumerId, handlers)
     }
 
     return () => {
@@ -132,6 +131,38 @@ export class SharedMTFContextFeedAdapter implements MTFContextFeed {
 
     this.subscriptions.set(key, subscription)
     return subscription
+  }
+
+  private requestInitialHistory(
+    subscription: SharedTimeframeSubscription,
+    consumerId: string,
+    handlers: MTFContextHandlers
+  ) {
+    requestMTFHistory(subscription.symbol, subscription.timeframe, 10)
+      .then((candles) => {
+        if (subscription.consumers.get(consumerId) !== handlers) return
+        if (candles.length === 0) {
+          handlers.onStatus(subscription.timeframe, subscription.lastCandle ? 'stale' : 'unavailable')
+          return
+        }
+
+        const latestHistory = candles[candles.length - 1]
+        if (subscription.lastCandle && latestHistory.time < subscription.lastCandle.time) {
+          handlers.onHistorical(subscription.timeframe, [subscription.lastCandle])
+          handlers.onStatus(subscription.timeframe, 'incomplete')
+          return
+        }
+
+        subscription.lastCandle = latestHistory
+        subscription.lastUpdatedAt = Date.now()
+        handlers.onHistorical(subscription.timeframe, candles)
+        handlers.onStatus(subscription.timeframe, 'ready')
+      })
+      .catch((error) => {
+        if (subscription.consumers.get(consumerId) !== handlers) return
+        handlers.onStatus(subscription.timeframe, subscription.lastCandle ? 'stale' : 'unavailable')
+        handlers.onError?.(subscription.timeframe, error)
+      })
   }
 
   private broadcastLive(subscription: SharedTimeframeSubscription, candle: CandleData) {

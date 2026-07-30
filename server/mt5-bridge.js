@@ -6,6 +6,11 @@ import { fileURLToPath } from 'url';
 
 const PORT = process.env.MT5_BRIDGE_PORT || 5555;
 const HOST = process.env.MT5_BRIDGE_HOST || '0.0.0.0';
+const HISTORY_TIMEOUT_MS = 7000;
+const HISTORY_CACHE_TTL_MS = 15000;
+const HISTORY_MAX_COUNT = 100;
+const HISTORY_DEFAULT_COUNT = 10;
+const SUPPORTED_HISTORY_TIMEFRAMES = new Set(['1m', '5m', '15m', '1H', '4H', '1D', '1W']);
 
 class MT5Bridge extends EventEmitter {
   constructor() {
@@ -202,6 +207,8 @@ const isMain = process.argv[1] && fileURLToPath(import.meta.url) === process.arg
 if (isMain) {
   const bridge = new MT5Bridge();
   bridge.start();
+  const historyRequests = new Map();
+  const historyCache = new Map();
 
   // Latest data buffer for HTTP polling
   const latestData = {
@@ -217,6 +224,14 @@ if (isMain) {
 
   bridge.on('account', (acc) => {
     latestData.account = acc;
+  });
+
+  bridge.on('history', (msg) => {
+    resolveHistoryMessage(msg);
+  });
+
+  bridge.on('historyComplete', (msg) => {
+    resolveHistoryMessage(msg);
   });
 
   // HTTP API server
@@ -247,6 +262,9 @@ if (isMain) {
     else if (req.url === '/account') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ account: latestData.account }));
+    }
+    else if (req.url.startsWith('/history') && req.method === 'GET') {
+      handleHistoryRequest(req, res);
     }
     else if (req.url === '/latest') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -283,6 +301,183 @@ if (isMain) {
     console.log('  GET  /latest   — ticks + account combined (used by frontend poller)');
     console.log('  POST /command  — send command to MT5');
   });
+
+  function handleHistoryRequest(req, res) {
+    const parsed = new URL(req.url, 'http://localhost');
+    const validation = validateHistoryParams(parsed.searchParams);
+    if (!validation.ok) {
+      writeHistoryError(res, 400, validation.error);
+      return;
+    }
+
+    requestHistory(validation.value)
+      .then((response) => {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(response));
+      })
+      .catch((error) => {
+        const status = error.code === 'MT5_DISCONNECTED' ? 503 : error.code === 'TIMEOUT' ? 504 : 500;
+        writeHistoryError(res, status, error);
+      });
+  }
+
+  function validateHistoryParams(params) {
+    const symbol = String(params.get('symbol') || '').trim().toUpperCase();
+    const timeframe = normalizeHistoryTimeframe(params.get('timeframe'));
+    const rawCount = params.get('count');
+    const count = rawCount === null ? HISTORY_DEFAULT_COUNT : Number(rawCount);
+
+    if (!/^[A-Z0-9._-]{1,24}$/.test(symbol)) {
+      return { ok: false, error: historyError('INVALID_REQUEST', 'Invalid history symbol') };
+    }
+    if (!timeframe) {
+      return { ok: false, error: historyError('INVALID_REQUEST', 'Invalid history timeframe') };
+    }
+    if (!Number.isInteger(count) || count < 1) {
+      return { ok: false, error: historyError('INVALID_REQUEST', 'Invalid history count') };
+    }
+
+    return { ok: true, value: { symbol, timeframe, count: Math.min(count, HISTORY_MAX_COUNT) } };
+  }
+
+  function requestHistory(request) {
+    const key = historyKey(request.symbol, request.timeframe);
+    const cached = historyCache.get(key);
+    if (cached && Date.now() - cached.fetchedAt <= HISTORY_CACHE_TTL_MS && cached.count >= request.count) {
+      return Promise.resolve(toHistoryResponse(request, cached.candles.slice(-request.count)));
+    }
+
+    const existing = historyRequests.get(key);
+    if (existing) return existing.promise.then((candles) => toHistoryResponse(request, candles.slice(-request.count)));
+
+    if (bridge.clients.size === 0) {
+      return Promise.reject(historyError('MT5_DISCONNECTED', 'MT5 client is not connected'));
+    }
+
+    let timeout = null;
+    const entry = { symbol: request.symbol, timeframe: request.timeframe, count: request.count };
+    entry.promise = new Promise((resolve, reject) => {
+      entry.resolvePromise = resolve;
+      entry.rejectPromise = reject;
+      timeout = setTimeout(() => {
+        historyRequests.delete(key);
+        reject(historyError('TIMEOUT', 'MT5 history request timed out'));
+      }, HISTORY_TIMEOUT_MS);
+    });
+    entry.resolve = (candles) => {
+      clearTimeout(timeout);
+      historyRequests.delete(key);
+      const normalized = normalizeHistoryCandles(candles).slice(-entry.count);
+      historyCache.set(key, { candles: normalized, count: normalized.length, fetchedAt: Date.now() });
+      entry.resolvePromise(normalized);
+    };
+    entry.reject = (error) => {
+      clearTimeout(timeout);
+      historyRequests.delete(key);
+      entry.rejectPromise(error);
+    };
+    historyRequests.set(key, entry);
+
+    const sent = bridge.sendToFirst({
+      type: 'get_history',
+      symbol: request.symbol,
+      timeframe: request.timeframe,
+      count: request.count,
+    });
+    if (!sent) entry.reject(historyError('MT5_DISCONNECTED', 'MT5 client is not connected'));
+
+    return entry.promise.then((candles) => toHistoryResponse(request, candles.slice(-request.count)));
+  }
+
+  function resolveHistoryMessage(msg) {
+    const symbol = String(msg.symbol || '').trim().toUpperCase();
+    const timeframe = normalizeHistoryTimeframe(msg.timeframe || msg.period);
+    if (!symbol || !timeframe) return;
+    const entry = historyRequests.get(historyKey(symbol, timeframe));
+    if (!entry) return;
+    entry.resolve(extractHistoryCandles(msg));
+  }
+
+  function extractHistoryCandles(msg) {
+    if (Array.isArray(msg.candles)) return msg.candles;
+    if (Array.isArray(msg.bars)) return msg.bars;
+    if (Array.isArray(msg.history)) return msg.history;
+    if (Array.isArray(msg.data)) return msg.data;
+    if (msg.open !== undefined && msg.high !== undefined && msg.low !== undefined && msg.close !== undefined) return [msg];
+    return [];
+  }
+
+  function normalizeHistoryCandles(candles) {
+    const byTime = new Map();
+    for (const raw of candles) {
+      const candle = normalizeHistoryCandle(raw);
+      if (candle) byTime.set(candle.time, candle);
+    }
+    return Array.from(byTime.values()).sort((a, b) => a.time - b.time);
+  }
+
+  function normalizeHistoryCandle(raw) {
+    const time = parseHistoryTime(raw.time ?? raw.timestamp ?? raw.t);
+    const open = toHistoryNumber(raw.open ?? raw.o);
+    const high = toHistoryNumber(raw.high ?? raw.h);
+    const low = toHistoryNumber(raw.low ?? raw.l);
+    const close = toHistoryNumber(raw.close ?? raw.c);
+    const volume = toHistoryNumber(raw.volume ?? raw.tick_volume ?? raw.real_volume ?? raw.v ?? 0);
+    if (time === null || ![open, high, low, close, volume].every(Number.isFinite) || high < low) return null;
+    return { time, open, high, low, close, volume };
+  }
+
+  function parseHistoryTime(value) {
+    if (typeof value === 'number') return value > 10000000000 ? Math.floor(value / 1000) : Math.floor(value);
+    if (typeof value === 'string') {
+      const numeric = Number(value);
+      if (Number.isFinite(numeric)) return parseHistoryTime(numeric);
+      const normalized = value.includes('T') ? value : value.replace(' ', 'T');
+      const parsed = Date.parse(normalized.endsWith('Z') ? normalized : `${normalized}Z`);
+      return Number.isNaN(parsed) ? null : Math.floor(parsed / 1000);
+    }
+    return null;
+  }
+
+  function normalizeHistoryTimeframe(value) {
+    const raw = String(value || '').trim();
+    const aliases = {
+      M1: '1m', M5: '5m', M15: '15m',
+      H1: '1H', H4: '4H', D1: '1D', W1: '1W',
+      '1h': '1H', '4h': '4H', '1d': '1D', '1w': '1W',
+    };
+    const normalized = aliases[raw] || raw;
+    return SUPPORTED_HISTORY_TIMEFRAMES.has(normalized) ? normalized : null;
+  }
+
+  function toHistoryResponse(request, candles) {
+    return { ok: true, symbol: request.symbol, timeframe: request.timeframe, candles, receivedAt: Date.now() };
+  }
+
+  function writeHistoryError(res, status, error) {
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      ok: false,
+      code: error.code || 'INTERNAL_ERROR',
+      message: error.message || 'History request failed',
+    }));
+  }
+
+  function historyError(code, message) {
+    const error = new Error(message);
+    error.code = code;
+    return error;
+  }
+
+  function historyKey(symbol, timeframe) {
+    return `${symbol}:${timeframe}`;
+  }
+
+  function toHistoryNumber(value) {
+    if (typeof value === 'number') return value;
+    if (typeof value === 'string') return Number.parseFloat(value);
+    return Number.NaN;
+  }
 
   // Graceful shutdown
   process.on('SIGINT', () => {
