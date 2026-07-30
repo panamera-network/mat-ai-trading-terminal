@@ -4,6 +4,7 @@ import {
   DrawingRuntimePlugin,
   isDrawingRuntimeTool,
 } from '@/core/drawing/DrawingRuntimePlugin'
+import { DrawingPersistenceScope } from '@/core/drawing/DrawingModel'
 import { DrawingType } from '@/types'
 
 interface PluginDrawingLayerProps {
@@ -12,6 +13,7 @@ interface PluginDrawingLayerProps {
   activeTool: DrawingType
   onToolSelect: (tool: string) => void
   onDrawingInteractionChange?: (isInteracting: boolean) => void
+  persistenceScope: DrawingPersistenceScope
 }
 
 export function isPluginDrawingTool(tool: DrawingType | string): boolean {
@@ -24,6 +26,7 @@ export default function PluginDrawingLayer({
   activeTool,
   onToolSelect,
   onDrawingInteractionChange,
+  persistenceScope,
 }: PluginDrawingLayerProps) {
   const pluginRef = useRef<DrawingRuntimePlugin | null>(null)
 
@@ -33,6 +36,7 @@ export default function PluginDrawingLayer({
       container,
       onToolSelect,
       onDrawingInteractionChange,
+      persistenceScope,
     })
     pluginRef.current = plugin
     controller.use(plugin)
@@ -53,6 +57,10 @@ export default function PluginDrawingLayer({
   useEffect(() => {
     pluginRef.current?.setActiveTool(activeTool)
   }, [activeTool])
+
+  useEffect(() => {
+    pluginRef.current?.setPersistenceScope(persistenceScope)
+  }, [persistenceScope])
 
   return null
 }

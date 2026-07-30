@@ -7,11 +7,19 @@ import {
 } from 'lightweight-charts-drawing'
 import { ChartPlugin, ChartPluginContext } from '@/core/chart/ChartPlugin'
 import { DrawingType } from '@/types'
+import { DrawingModel, DrawingPersistenceScope } from '@/core/drawing/DrawingModel'
+import { DrawingPersistenceEngine } from '@/core/drawing/DrawingPersistenceEngine'
+import {
+  drawingModelToRuntimeDrawing,
+  serializeRuntimeDrawings,
+} from '@/core/drawing/DrawingSerializer'
 
 interface DrawingRuntimePluginOptions {
   container: HTMLElement
   onToolSelect: (tool: string) => void
   onDrawingInteractionChange?: (isInteracting: boolean) => void
+  persistenceScope?: DrawingPersistenceScope
+  persistenceEngine?: DrawingPersistenceEngine
 }
 
 const TOOL_MAP: Partial<Record<DrawingType, string>> = {
@@ -98,24 +106,44 @@ export class DrawingRuntimePlugin implements ChartPlugin {
   private readonly previewId = `__preview_${Math.random().toString(36).slice(2)}__`
   private readonly registry = getToolRegistry()
   private cleanupListeners: (() => void) | null = null
+  private cleanupManagerEvents: (() => void) | null = null
+  private persistenceEngine: DrawingPersistenceEngine
+  private persistenceScope: DrawingPersistenceScope | null = null
+  private loadGeneration = 0
+  private saveTimer: ReturnType<typeof setTimeout> | null = null
+  private isRestoring = false
   private onToolSelect: (tool: string) => void
   private onDrawingInteractionChange?: (isInteracting: boolean) => void
 
   constructor(private readonly options: DrawingRuntimePluginOptions) {
     this.onToolSelect = options.onToolSelect
     this.onDrawingInteractionChange = options.onDrawingInteractionChange
+    this.persistenceEngine = options.persistenceEngine || new DrawingPersistenceEngine()
+    this.persistenceScope = options.persistenceScope || null
   }
 
   initialize(context: ChartPluginContext) {
     this.context = context
     this.manager = new DrawingManager()
     this.manager.attach(context.chart as any, context.mainSeries as any, this.options.container)
+    this.attachManagerEvents()
     this.attachListeners()
+    this.restorePersistedDrawings()
   }
 
   setCallbacks(callbacks: Pick<DrawingRuntimePluginOptions, 'onToolSelect' | 'onDrawingInteractionChange'>) {
     this.onToolSelect = callbacks.onToolSelect
     this.onDrawingInteractionChange = callbacks.onDrawingInteractionChange
+  }
+
+  setPersistenceScope(scope: DrawingPersistenceScope | null) {
+    if (sameScope(this.persistenceScope, scope)) return
+    this.flushPendingSave()
+    this.loadGeneration++
+    this.persistenceScope = scope
+    this.cancelActiveOperation()
+    this.replaceDrawings([])
+    this.restorePersistedDrawings()
   }
 
   setActiveTool(tool: DrawingType | string) {
@@ -133,11 +161,13 @@ export class DrawingRuntimePlugin implements ChartPlugin {
     const selectedDrawing = this.manager?.getSelectedDrawing()
     if (!this.manager || !selectedDrawing) return
     this.manager.removeDrawing(selectedDrawing.id)
+    this.schedulePersistedSave()
   }
 
   clearDrawings() {
     this.cancelActiveOperation()
     this.manager?.clearAll()
+    this.schedulePersistedSave()
   }
 
   cancelActiveOperation() {
@@ -153,12 +183,16 @@ export class DrawingRuntimePlugin implements ChartPlugin {
   }
 
   destroy() {
+    this.flushPendingSave()
     this.cleanupListeners?.()
     this.cleanupListeners = null
+    this.cleanupManagerEvents?.()
+    this.cleanupManagerEvents = null
     this.cancelActiveOperation()
     this.manager?.detach()
     this.manager = null
     this.context = null
+    this.persistenceEngine.destroy()
   }
 
   private attachListeners() {
@@ -202,6 +236,7 @@ export class DrawingRuntimePlugin implements ChartPlugin {
         this.createDrawing(toolType, [anchor])
         this.pendingAnchors = []
         this.onToolSelect('cursor')
+        this.schedulePersistedSave()
       } else {
         this.updatePreview(toolType, anchor)
       }
@@ -269,6 +304,7 @@ export class DrawingRuntimePlugin implements ChartPlugin {
 
       event.preventDefault()
       this.manager.removeDrawing(selectedDrawing.id)
+      this.schedulePersistedSave()
     }
 
     const handleWindowMouseUp = () => {
@@ -386,6 +422,7 @@ export class DrawingRuntimePlugin implements ChartPlugin {
       this.onToolSelect('cursor')
       this.onDrawingInteractionChange?.(false)
       this.setInteractionLocked(false)
+      this.schedulePersistedSave()
     }
   }
 
@@ -400,4 +437,118 @@ export class DrawingRuntimePlugin implements ChartPlugin {
     this.releaseInteractionLock?.()
     this.releaseInteractionLock = null
   }
+
+  private attachManagerEvents() {
+    const manager = this.manager
+    if (!manager) return
+    const unsubscribers = [
+      manager.on('drawing:added', (event) => {
+        if (event.drawingId !== this.previewId) this.schedulePersistedSave()
+      }),
+      manager.on('drawing:removed', (event) => {
+        if (event.drawingId !== this.previewId) this.schedulePersistedSave()
+      }),
+      manager.on('drawing:updated', (event) => {
+        if (event.drawingId !== this.previewId) this.schedulePersistedSave()
+      }),
+      manager.on('drawing:cleared', () => this.schedulePersistedSave()),
+    ]
+    this.cleanupManagerEvents = () => {
+      unsubscribers.forEach((unsubscribe) => unsubscribe())
+    }
+  }
+
+  exportDrawings(): DrawingModel[] {
+    if (!this.manager) return []
+    return serializeRuntimeDrawings(this.manager.exportDrawings())
+  }
+
+  restoreDrawings(drawings: readonly DrawingModel[]) {
+    this.replaceDrawings(drawings)
+  }
+
+  private async restorePersistedDrawings() {
+    const scope = this.persistenceScope
+    if (!scope || !this.manager) return
+    const generation = ++this.loadGeneration
+
+    try {
+      const drawings = await this.persistenceEngine.load(scope)
+      if (generation !== this.loadGeneration || scope !== this.persistenceScope || !this.manager) return
+      this.replaceDrawings(drawings)
+    } catch (error) {
+      console.warn('DrawingPersistence: restore failed', error)
+    }
+  }
+
+  private replaceDrawings(drawings: readonly DrawingModel[]) {
+    const manager = this.manager
+    if (!manager) return
+    this.isRestoring = true
+    try {
+      manager.clearAll()
+      for (const drawingModel of drawings) {
+        const runtimeDrawing = drawingModelToRuntimeDrawing(drawingModel)
+        if (!runtimeDrawing) continue
+        const drawing = this.registry.createDrawing(
+          runtimeDrawing.type,
+          runtimeDrawing.id,
+          runtimeDrawing.anchors as Anchor[],
+          runtimeDrawing.style
+        )
+        if (!drawing) continue
+        drawing.updateOptions(runtimeDrawing.options)
+        manager.addDrawing(drawing)
+      }
+      this.idCounter = Math.max(this.idCounter, ...drawings.map((drawing) => getDrawingNumericId(drawing.id)))
+    } finally {
+      this.isRestoring = false
+    }
+  }
+
+  private schedulePersistedSave() {
+    if (this.isRestoring || !this.persistenceScope) return
+    if (this.saveTimer) clearTimeout(this.saveTimer)
+    const generation = this.loadGeneration
+    const scope = this.persistenceScope
+    this.saveTimer = setTimeout(() => {
+      this.saveTimer = null
+      if (generation !== this.loadGeneration || scope !== this.persistenceScope) return
+      this.saveNow(scope)
+    }, 250)
+  }
+
+  private flushPendingSave() {
+    if (!this.saveTimer) return
+    clearTimeout(this.saveTimer)
+    this.saveTimer = null
+    if (this.persistenceScope) this.saveNow(this.persistenceScope)
+  }
+
+  private saveNow(scope: DrawingPersistenceScope) {
+    const drawings = this.exportDrawings()
+    const operation = drawings.length === 0
+      ? this.persistenceEngine.clear(scope)
+      : this.persistenceEngine.save(scope, drawings)
+    operation.catch((error) => {
+      console.warn('DrawingPersistence: save failed', error)
+    })
+  }
+}
+
+function sameScope(a: DrawingPersistenceScope | null, b: DrawingPersistenceScope | null): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  return (
+    (a.workspaceId || 'terminal') === (b.workspaceId || 'terminal') &&
+    a.layoutId === b.layoutId &&
+    a.chartId === b.chartId &&
+    a.symbol === b.symbol &&
+    a.timeframe === b.timeframe
+  )
+}
+
+function getDrawingNumericId(id: string): number {
+  const match = /^drawing-(\d+)$/.exec(id)
+  return match ? Number(match[1]) : 0
 }

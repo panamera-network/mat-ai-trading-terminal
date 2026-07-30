@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState, useCallback } from 'react'
+import { useRef, useEffect, useState, useCallback, useMemo } from 'react'
 import {
   IChartApi,
   ISeriesApi,
@@ -56,6 +56,7 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
   const [showHelp, setShowHelp] = useState(false)
 
   const chart = useLayoutStore((s) => s.layout.charts.find((c) => c.id === chartId)!)
+  const layoutType = useLayoutStore((s) => s.layout.type)
   const updateChart = useLayoutStore((s) => s.updateChart)
   const setActiveChart = useLayoutStore((s) => s.setActiveChart)
   const removeChart = useLayoutStore((s) => s.removeChart)
@@ -257,6 +258,13 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
   const overlayIndicators = chart.indicators.filter((i) => i.type === 'overlay')
   const panelIndicators = chart.indicators.filter((i) => i.type === 'panel' && i.visible)
   const volumeProfileIndicator = chart.indicators.find((i) => i.type === 'volume-profile' && i.visible)
+  const drawingPersistenceScope = useMemo(() => ({
+    workspaceId: 'mat-terminal',
+    layoutId: layoutType,
+    chartId,
+    symbol: chart.symbol.id,
+    timeframe: chart.timeframe,
+  }), [layoutType, chartId, chart.symbol.id, chart.timeframe])
 
   useEffect(() => {
     indicatorOverlayPluginRef.current?.setIndicators(overlayIndicators)
@@ -320,6 +328,7 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
                 onDrawingInteractionChange={(isInteracting) => {
                   isDrawingInteractionRef.current = isInteracting
                 }}
+                persistenceScope={drawingPersistenceScope}
               />
             )}
             {chartApi && mainSeries && <PositionLines chart={chartApi} series={mainSeries as any} symbol={chart.symbol} />}
