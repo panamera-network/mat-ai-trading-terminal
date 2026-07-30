@@ -30,6 +30,8 @@ import PluginDrawingLayer from './PluginDrawingLayer'
 import { TradingChartController } from '@/core/chart/TradingChartController'
 import { IndicatorOverlayPlugin } from '@/core/indicators/IndicatorOverlayPlugin'
 import { TradingChartSyncEngine } from '@/core/sync/TradingChartSyncEngine'
+import { MTFContextPlugin } from '@/core/mtf/MTFContextPlugin'
+import { MTFContextCoordinator } from '@/core/mtf/MTFContextCoordinator'
 
 interface ChartTileProps {
   chartId: string
@@ -48,6 +50,8 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
   const volumeSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null)
   const controllerRef = useRef<TradingChartController | null>(null)
   const indicatorOverlayPluginRef = useRef<IndicatorOverlayPlugin | null>(null)
+  const mtfContextPluginRef = useRef<MTFContextPlugin | null>(null)
+  const mtfContextCoordinatorRef = useRef<MTFContextCoordinator | null>(null)
   const isDrawingInteractionRef = useRef(false)
   const followRealtimeRef = useRef(true)
   const [chartApi, setChartApi] = useState<IChartApi | null>(null)
@@ -153,6 +157,14 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
     const indicatorOverlayPlugin = new IndicatorOverlayPlugin()
     controller.use(indicatorOverlayPlugin)
     indicatorOverlayPluginRef.current = indicatorOverlayPlugin
+    const mtfContextPlugin = new MTFContextPlugin()
+    controller.use(mtfContextPlugin)
+    mtfContextPlugin.setEnabled(false)
+    mtfContextPluginRef.current = mtfContextPlugin
+    mtfContextCoordinatorRef.current = new MTFContextCoordinator({
+      chartId,
+      plugin: mtfContextPlugin,
+    })
     setChartApi(chartApi)
     setMainSeries(series)
 
@@ -164,9 +176,12 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
 
     return () => {
       chartApi.timeScale().unsubscribeVisibleLogicalRangeChange(updateFollowRealtime)
+      mtfContextCoordinatorRef.current?.destroy()
+      mtfContextCoordinatorRef.current = null
       controller.destroy()
       controllerRef.current = null
       indicatorOverlayPluginRef.current = null
+      mtfContextPluginRef.current = null
       chartRef.current = null
       seriesRef.current = null
       volumeSeriesRef.current = null
@@ -174,6 +189,14 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
       setMainSeries(null)
     }
   }, [chartId])
+
+  useEffect(() => {
+    mtfContextCoordinatorRef.current?.update({
+      symbol: chart.symbol,
+      mainTimeframe: chart.timeframe,
+      replayActive: isBacktestMode,
+    })
+  }, [chart.symbol, chart.timeframe, isBacktestMode])
 
   // Handle chart type change
   useEffect(() => {

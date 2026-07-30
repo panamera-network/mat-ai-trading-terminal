@@ -9,6 +9,7 @@ export interface FeedSubscriptionRequest {
   chartId: string
   symbol: Symbol
   timeframe: Timeframe
+  driveOrders?: boolean
 }
 
 export interface HistoricalFeedRequest extends FeedSubscriptionRequest {
@@ -38,6 +39,7 @@ interface LegacyFeed {
       onCandle: (data: CandleData) => void
       onError?: (error: Error) => void
       onConnect?: () => void
+      driveOrders?: boolean
     }
   ) => string
   disconnect: (id: string) => void
@@ -74,6 +76,7 @@ function createLegacyFeedAdapter(feed: LegacyFeed): TradingFeed {
           handlers.onConnectionState?.('error')
           handlers.onError?.(error)
         },
+        driveOrders: request.driveOrders,
       })
       activeSubscriptionId = subscriptionId
 
