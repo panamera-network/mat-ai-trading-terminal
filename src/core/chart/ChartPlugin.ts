@@ -11,6 +11,7 @@ export interface ChartPluginContext {
 export interface ChartPlugin {
   readonly id: string
   initialize: (context: ChartPluginContext) => void
+  onSeriesChange?: (context: ChartPluginContext) => void
   setData?: (candles: readonly CandleData[]) => void
   onBar?: (candle: CandleData, candles: readonly CandleData[]) => void
   onThemeChange?: () => void

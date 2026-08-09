@@ -883,10 +883,26 @@ void HandleGetHistory(string jsonStr)
    string timeframeText = JsonGetString(jsonStr, "timeframe");
    string requestId = JsonGetString(jsonStr, "request_id");
    int count = (int)StringToInteger(JsonGetString(jsonStr, "count"));
+   long fromSeconds = (long)StringToInteger(JsonGetString(jsonStr, "from"));
+   long toSeconds = (long)StringToInteger(JsonGetString(jsonStr, "to"));
 
    if(count <= 0)
       count = 10;
    count = MathMin(count, 1000);
+   if(fromSeconds < 0)
+      fromSeconds = 0;
+   if(toSeconds < 0)
+      toSeconds = 0;
+   if((fromSeconds == 0 && toSeconds > 0) || (fromSeconds > 0 && toSeconds == 0) || (fromSeconds > toSeconds))
+   {
+      SendHistoryError(
+         requestedSymbol,
+         timeframeText,
+         requestId,
+         "Invalid history range"
+      );
+      return;
+   }
 
    ENUM_TIMEFRAMES timeframe;
    if(!TryStringToTimeframe(timeframeText, timeframe))
@@ -900,7 +916,7 @@ void HandleGetHistory(string jsonStr)
       return;
    }
 
-   SendHistoryBars(requestedSymbol, timeframe, count, requestId);
+   SendHistoryBars(requestedSymbol, timeframe, count, requestId, fromSeconds, toSeconds);
 }
 
 //+------------------------------------------------------------------+
@@ -910,7 +926,9 @@ void SendHistoryBars(
    string requestedSymbol,
    ENUM_TIMEFRAMES timeframe,
    int count,
-   string requestId
+   string requestId,
+   long fromSeconds = 0,
+   long toSeconds = 0
 )
 {
    string brokerSymbol = ResolveBrokerSymbol(requestedSymbol);
@@ -940,7 +958,11 @@ void SendHistoryBars(
    ArraySetAsSeries(rates, true);
 
    ResetLastError();
-   int copied = CopyRates(brokerSymbol, timeframe, 0, count, rates);
+   int copied = 0;
+   if(fromSeconds > 0 && toSeconds > 0)
+      copied = CopyRates(brokerSymbol, timeframe, (datetime)fromSeconds, (datetime)toSeconds, rates);
+   else
+      copied = CopyRates(brokerSymbol, timeframe, 0, count, rates);
    if(copied < 1)
    {
       SendHistoryError(

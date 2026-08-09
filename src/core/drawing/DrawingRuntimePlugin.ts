@@ -19,14 +19,25 @@ import {
   SnapAxis,
   SnapMode,
 } from '@/core/drawing/DrawingSnapEngine'
+import { getTimeframeSeconds } from '@/core/mtf/MTFAggregationEngine'
+import { Timeframe } from '@/types'
 
 interface DrawingRuntimePluginOptions {
   container: HTMLElement
   onToolSelect: (tool: string) => void
   onDrawingInteractionChange?: (isInteracting: boolean) => void
+  onSelectedDrawingChange?: (selection: DrawingSelectionInfo | null) => void
   persistenceScope?: DrawingPersistenceScope
   persistenceEngine?: DrawingPersistenceEngine
   magnetEnabled?: boolean
+}
+
+export interface DrawingSelectionInfo {
+  id: string
+  type: string
+  lineColor: string
+  lineWidth: number
+  locked: boolean
 }
 
 const TOOL_MAP: Partial<Record<DrawingType, string>> = {
@@ -116,6 +127,9 @@ export class DrawingRuntimePlugin implements ChartPlugin {
   private cleanupManagerEvents: (() => void) | null = null
   private persistenceEngine: DrawingPersistenceEngine
   private persistenceScope: DrawingPersistenceScope | null = null
+  private canonicalDrawings: DrawingModel[] = []
+  private currentData: readonly CandleData[] = []
+  private currentTimeframe: Timeframe | null = null
   private loadGeneration = 0
   private saveTimer: ReturnType<typeof setTimeout> | null = null
   private isRestoring = false
@@ -123,14 +137,18 @@ export class DrawingRuntimePlugin implements ChartPlugin {
   private magnetEnabled = false
   private shiftSnapEnabled = false
   private resizeAnchorIndex: number | null = null
+  private lastSelectionKey = ''
   private onToolSelect: (tool: string) => void
   private onDrawingInteractionChange?: (isInteracting: boolean) => void
+  private onSelectedDrawingChange?: (selection: DrawingSelectionInfo | null) => void
 
   constructor(private readonly options: DrawingRuntimePluginOptions) {
     this.onToolSelect = options.onToolSelect
     this.onDrawingInteractionChange = options.onDrawingInteractionChange
+    this.onSelectedDrawingChange = options.onSelectedDrawingChange
     this.persistenceEngine = options.persistenceEngine || new DrawingPersistenceEngine()
     this.persistenceScope = options.persistenceScope || null
+    this.currentTimeframe = options.persistenceScope?.timeframe || null
     this.magnetEnabled = Boolean(options.magnetEnabled)
   }
 
@@ -149,19 +167,31 @@ export class DrawingRuntimePlugin implements ChartPlugin {
     this.restorePersistedDrawings()
   }
 
-  setCallbacks(callbacks: Pick<DrawingRuntimePluginOptions, 'onToolSelect' | 'onDrawingInteractionChange'>) {
+  setCallbacks(callbacks: Pick<DrawingRuntimePluginOptions, 'onToolSelect' | 'onDrawingInteractionChange' | 'onSelectedDrawingChange'>) {
     this.onToolSelect = callbacks.onToolSelect
     this.onDrawingInteractionChange = callbacks.onDrawingInteractionChange
+    this.onSelectedDrawingChange = callbacks.onSelectedDrawingChange
   }
 
   setPersistenceScope(scope: DrawingPersistenceScope | null) {
-    if (sameScope(this.persistenceScope, scope)) return
+    this.currentTimeframe = scope?.timeframe || this.currentTimeframe
+    if (sameScope(this.persistenceScope, scope)) {
+      this.renderCanonicalDrawings()
+      return
+    }
     this.flushPendingSave()
     this.loadGeneration++
     this.persistenceScope = scope
     this.cancelActiveOperation()
+    this.canonicalDrawings = []
     this.replaceDrawings([])
     this.restorePersistedDrawings()
+  }
+
+  setTimeframe(timeframe: Timeframe) {
+    if (this.currentTimeframe === timeframe) return
+    this.currentTimeframe = timeframe
+    this.renderCanonicalDrawings()
   }
 
   setActiveTool(tool: DrawingType | string) {
@@ -177,18 +207,62 @@ export class DrawingRuntimePlugin implements ChartPlugin {
   }
 
   setData(candles: readonly CandleData[]) {
+    this.currentData = candles
     this.snapEngine?.setCandles(candles)
+    this.renderCanonicalDrawings()
   }
 
   onBar(_candle: CandleData, candles: readonly CandleData[]) {
+    this.currentData = candles
     this.snapEngine?.setCandles(candles)
+  }
+
+  onSeriesChange(context: ChartPluginContext) {
+    this.context = context
+    this.snapEngine?.destroy()
+    this.snapEngine = new DrawingSnapEngine({
+      timeToCoordinate: (time) => context.chart.timeScale().timeToCoordinate(time as Time),
+      priceToCoordinate: (price) => context.mainSeries.priceToCoordinate(price),
+    })
+    this.snapEngine.setCandles(context.getData())
+    this.updateSnapEnabled()
+    this.manager?.detach()
+    this.manager?.attach(context.chart as any, context.mainSeries as any, this.options.container)
+    this.lastSelectionKey = ''
+    this.renderCanonicalDrawings()
   }
 
   deleteSelected() {
     const selectedDrawing = this.manager?.getSelectedDrawing()
     if (!this.manager || !selectedDrawing) return
     this.manager.removeDrawing(selectedDrawing.id)
+    this.canonicalDrawings = this.canonicalDrawings.filter((drawing) => drawing.id !== selectedDrawing.id)
     this.schedulePersistedSave()
+    this.notifySelectedDrawing()
+  }
+
+  updateSelectedStyle(style: { lineColor?: string; lineWidth?: number }) {
+    const selectedDrawing = this.manager?.getSelectedDrawing()
+    if (!selectedDrawing) return
+    selectedDrawing.updateStyle({
+      ...style,
+      ...(style.lineColor ? { fillColor: `${style.lineColor}33` } : {}),
+    })
+    this.canonicalDrawings = this.canonicalDrawings.map((drawing) => (
+      drawing.id === selectedDrawing.id
+        ? {
+            ...drawing,
+            style: {
+              ...drawing.style,
+              ...style,
+              ...(style.lineColor ? { fillColor: `${style.lineColor}33` } : {}),
+            },
+            updatedAt: Date.now(),
+          }
+        : drawing
+    ))
+    this.schedulePersistedSave()
+    this.notifySelectedDrawing()
   }
 
   clearDrawings() {
@@ -344,6 +418,7 @@ export class DrawingRuntimePlugin implements ChartPlugin {
       event.preventDefault()
       this.manager.removeDrawing(selectedDrawing.id)
       this.schedulePersistedSave()
+      this.notifySelectedDrawing()
     }
 
     const handleKeyUp = (event: KeyboardEvent) => {
@@ -461,7 +536,11 @@ export class DrawingRuntimePlugin implements ChartPlugin {
 
     if (!drawing) return null
     this.manager.addDrawing(drawing)
-    if (!preview) this.manager.selectDrawing(drawing.id)
+    if (!preview) {
+      this.manager.selectDrawing(drawing.id)
+      this.syncCanonicalFromRuntime()
+      this.notifySelectedDrawing()
+    }
     return drawing
   }
 
@@ -525,15 +604,25 @@ export class DrawingRuntimePlugin implements ChartPlugin {
     if (!manager) return
     const unsubscribers = [
       manager.on('drawing:added', (event) => {
+        if (event.drawingId !== this.previewId && !this.isRestoring) this.syncCanonicalFromRuntime()
         if (event.drawingId !== this.previewId) this.schedulePersistedSave()
       }),
       manager.on('drawing:removed', (event) => {
+        if (event.drawingId !== this.previewId && !this.isRestoring) this.syncCanonicalFromRuntime()
         if (event.drawingId !== this.previewId) this.schedulePersistedSave()
+        if (event.drawingId !== this.previewId) this.notifySelectedDrawing()
       }),
       manager.on('drawing:updated', (event) => {
+        if (event.drawingId !== this.previewId && !this.isRestoring) this.syncCanonicalFromRuntime()
         if (event.drawingId !== this.previewId) this.schedulePersistedSave()
+        if (event.drawingId !== this.previewId) this.notifySelectedDrawing()
       }),
-      manager.on('drawing:cleared', () => this.schedulePersistedSave()),
+      manager.on('drawing:selected', () => this.notifySelectedDrawing()),
+      manager.on('drawing:deselected', () => this.notifySelectedDrawing()),
+      manager.on('drawing:cleared', () => {
+        this.schedulePersistedSave()
+        this.notifySelectedDrawing()
+      }),
     ]
     this.cleanupManagerEvents = () => {
       unsubscribers.forEach((unsubscribe) => unsubscribe())
@@ -541,11 +630,13 @@ export class DrawingRuntimePlugin implements ChartPlugin {
   }
 
   exportDrawings(): DrawingModel[] {
+    if (this.canonicalDrawings.length > 0) return this.canonicalDrawings.map((drawing) => cloneDrawingModel(drawing))
     if (!this.manager) return []
     return serializeRuntimeDrawings(this.manager.exportDrawings())
   }
 
   restoreDrawings(drawings: readonly DrawingModel[]) {
+    this.canonicalDrawings = drawings.map((drawing) => cloneDrawingModel(drawing))
     this.replaceDrawings(drawings)
   }
 
@@ -557,6 +648,7 @@ export class DrawingRuntimePlugin implements ChartPlugin {
     try {
       const drawings = await this.persistenceEngine.load(scope)
       if (generation !== this.loadGeneration || scope !== this.persistenceScope || !this.manager) return
+      this.canonicalDrawings = drawings.map((drawing) => cloneDrawingModel(drawing))
       this.replaceDrawings(drawings)
     } catch (error) {
       console.warn('DrawingPersistence: restore failed', error)
@@ -570,7 +662,7 @@ export class DrawingRuntimePlugin implements ChartPlugin {
     try {
       manager.clearAll()
       for (const drawingModel of drawings) {
-        const runtimeDrawing = drawingModelToRuntimeDrawing(drawingModel)
+        const runtimeDrawing = drawingModelToRuntimeDrawing(this.adaptDrawingForRuntime(drawingModel))
         if (!runtimeDrawing) continue
         const drawing = this.registry.createDrawing(
           runtimeDrawing.type,
@@ -586,6 +678,69 @@ export class DrawingRuntimePlugin implements ChartPlugin {
     } finally {
       this.isRestoring = false
     }
+    this.notifySelectedDrawing()
+  }
+
+  private renderCanonicalDrawings() {
+    if (this.isRestoring || this.canonicalDrawings.length === 0 || !this.manager) return
+    this.replaceDrawings(this.canonicalDrawings)
+  }
+
+  private syncCanonicalFromRuntime() {
+    if (!this.manager) return
+    this.canonicalDrawings = serializeRuntimeDrawings(this.manager.exportDrawings())
+  }
+
+  private adaptDrawingForRuntime(drawing: DrawingModel): DrawingModel {
+    return {
+      ...drawing,
+      anchors: drawing.anchors.map((anchor) => ({
+        ...anchor,
+        time: this.resolveRuntimeAnchorTime(anchor.time),
+      })),
+    }
+  }
+
+  private resolveRuntimeAnchorTime(time: number): number {
+    if (this.context?.chart.timeScale().timeToCoordinate(time as Time) !== null) return time
+
+    const timeframeSeconds = this.currentTimeframe ? getTimeframeSeconds(this.currentTimeframe) : null
+    const bucketTime = timeframeSeconds ? Math.floor(time / timeframeSeconds) * timeframeSeconds : time
+    if (this.context?.chart.timeScale().timeToCoordinate(bucketTime as Time) !== null) return bucketTime
+
+    if (this.currentData.length === 0) return bucketTime
+    let nearest = this.currentData[0].time
+    let nearestDistance = Math.abs(nearest - time)
+    for (const candle of this.currentData) {
+      const distance = Math.abs(candle.time - time)
+      if (distance < nearestDistance) {
+        nearest = candle.time
+        nearestDistance = distance
+      }
+    }
+    return nearest
+  }
+
+  private notifySelectedDrawing() {
+    const selected = this.manager?.getSelectedDrawing()
+    if (!selected) {
+      if (this.lastSelectionKey === 'none') return
+      this.lastSelectionKey = 'none'
+      this.onSelectedDrawingChange?.(null)
+      return
+    }
+
+    const selection = {
+      id: selected.id,
+      type: selected.type,
+      lineColor: selected.style.lineColor || '#8b5cf6',
+      lineWidth: selected.style.lineWidth || 2,
+      locked: Boolean(selected.options.locked),
+    }
+    const selectionKey = `${selection.id}:${selection.type}:${selection.lineColor}:${selection.lineWidth}:${selection.locked}`
+    if (selectionKey === this.lastSelectionKey) return
+    this.lastSelectionKey = selectionKey
+    this.onSelectedDrawingChange?.(selection)
   }
 
   private schedulePersistedSave() {
@@ -625,9 +780,17 @@ function sameScope(a: DrawingPersistenceScope | null, b: DrawingPersistenceScope
     (a.workspaceId || 'terminal') === (b.workspaceId || 'terminal') &&
     a.layoutId === b.layoutId &&
     a.chartId === b.chartId &&
-    a.symbol === b.symbol &&
-    a.timeframe === b.timeframe
+    a.symbol === b.symbol
   )
+}
+
+function cloneDrawingModel(drawing: DrawingModel): DrawingModel {
+  return {
+    ...drawing,
+    anchors: drawing.anchors.map((anchor) => ({ ...anchor })),
+    style: { ...drawing.style },
+    metadata: drawing.metadata ? { ...drawing.metadata } : undefined,
+  }
 }
 
 function getDrawingNumericId(id: string): number {

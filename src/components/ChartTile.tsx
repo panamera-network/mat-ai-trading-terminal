@@ -3,7 +3,7 @@ import {
   IChartApi,
   ISeriesApi,
 } from 'lightweight-charts'
-import { X } from 'lucide-react'
+import { Trash2, X } from 'lucide-react'
 import { useLayoutStore } from '@/stores/layoutStore'
 import { useBacktestStore } from '@/stores/backtestStore'
 import { useRealtimeFeed } from '@/hooks/useRealtimeFeed'
@@ -26,12 +26,15 @@ import KeyboardHelpModal from './KeyboardHelpModal'
 import IndicatorsModal from './IndicatorsModal'
 import IndicatorPanel from './IndicatorPanel'
 import VolumeProfileIndicator from './VolumeProfileIndicator'
-import PluginDrawingLayer from './PluginDrawingLayer'
+import PluginDrawingLayer, { PluginDrawingLayerHandle } from './PluginDrawingLayer'
+import { DrawingSelectionInfo } from '@/core/drawing/DrawingRuntimePlugin'
 import { TradingChartController } from '@/core/chart/TradingChartController'
 import { IndicatorOverlayPlugin } from '@/core/indicators/IndicatorOverlayPlugin'
 import { TradingChartSyncEngine } from '@/core/sync/TradingChartSyncEngine'
 import { MTFContextPlugin } from '@/core/mtf/MTFContextPlugin'
 import { MTFContextCoordinator } from '@/core/mtf/MTFContextCoordinator'
+import { getTimeframeSeconds, prepareCandles } from '@/core/mtf/MTFAggregationEngine'
+import { requestBridgeHistoryRange } from '@/core/feed/BridgeHistoryClient'
 
 interface ChartTileProps {
   chartId: string
@@ -52,17 +55,20 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
   const indicatorOverlayPluginRef = useRef<IndicatorOverlayPlugin | null>(null)
   const mtfContextPluginRef = useRef<MTFContextPlugin | null>(null)
   const mtfContextCoordinatorRef = useRef<MTFContextCoordinator | null>(null)
+  const drawingLayerRef = useRef<PluginDrawingLayerHandle | null>(null)
   const isDrawingInteractionRef = useRef(false)
   const followRealtimeRef = useRef(true)
   const [chartApi, setChartApi] = useState<IChartApi | null>(null)
   const [mainSeries, setMainSeries] = useState<ISeriesApi<any> | null>(null)
   const [chartContainer, setChartContainer] = useState<HTMLDivElement | null>(null)
   const [showHelp, setShowHelp] = useState(false)
+  const [selectedDrawing, setSelectedDrawing] = useState<DrawingSelectionInfo | null>(null)
 
   const chart = useLayoutStore((s) => s.layout.charts.find((c) => c.id === chartId)!)
   const layoutType = useLayoutStore((s) => s.layout.type)
   const magnetMode = useLayoutStore((s) => s.magnetMode)
   const updateChart = useLayoutStore((s) => s.updateChart)
+  const updateChartData = useLayoutStore((s) => s.updateChartData)
   const setActiveChart = useLayoutStore((s) => s.setActiveChart)
   const removeChart = useLayoutStore((s) => s.removeChart)
 
@@ -118,6 +124,10 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
       ask,
     })
   }, [chart.symbol, bid, ask, spread, placeOrder])
+
+  const handleDrawingInteractionChange = useCallback((isInteracting: boolean) => {
+    isDrawingInteractionRef.current = isInteracting
+  }, [])
 
   // Keyboard shortcuts
   useKeyboardShortcuts(
@@ -239,6 +249,44 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
     alertsService.checkAlerts(chart.symbol.id, bid, ask)
   }, [chart.data, isBacktestMode, chart.symbol.id])
 
+  useEffect(() => {
+    if (isBacktestMode || chart.symbol.exchange !== 'mt5') return
+    const timeframeSeconds = getTimeframeSeconds(chart.timeframe)
+    if (!timeframeSeconds) return
+
+    let cancelled = false
+    const timer = window.setTimeout(() => {
+      const drawings = drawingLayerRef.current?.exportDrawings() ?? []
+      const anchorTimes = Array.from(new Set(
+        drawings.flatMap((drawing) => drawing.anchors.map((anchor) => Math.floor(anchor.time)))
+      )).filter((time) => Number.isFinite(time) && time > 0)
+      if (anchorTimes.length === 0) return
+
+      const padding = timeframeSeconds * 5
+      Promise.all(
+        anchorTimes.map((time) => requestBridgeHistoryRange(chart.symbol, chart.timeframe, {
+          from: Math.max(1, time - padding),
+          to: time + padding,
+        }).catch(() => []))
+      ).then((ranges) => {
+        if (cancelled) return
+        const extraCandles = ranges.flat()
+        if (extraCandles.length === 0) return
+        const currentChart = useLayoutStore.getState().layout.charts.find((item) => item.id === chartId)
+        if (!currentChart || currentChart.symbol.id !== chart.symbol.id || currentChart.timeframe !== chart.timeframe) return
+        const merged = prepareCandles([...currentChart.data, ...extraCandles]).candles
+        if (merged.length !== currentChart.data.length) {
+          updateChartData(chartId, merged)
+        }
+      })
+    }, 100)
+
+    return () => {
+      cancelled = true
+      window.clearTimeout(timer)
+    }
+  }, [chartId, chart.symbol, chart.timeframe, isBacktestMode, updateChartData])
+
   // Backtest mode: display historical data
   useEffect(() => {
     const controller = controllerRef.current
@@ -288,11 +336,14 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
     chartId,
     symbol: chart.symbol.id,
     timeframe: chart.timeframe,
-  }), [layoutType, chartId, chart.symbol.id, chart.timeframe])
+  }), [layoutType, chartId, chart.symbol.id])
 
   useEffect(() => {
     indicatorOverlayPluginRef.current?.setIndicators(overlayIndicators)
   }, [overlayIndicators])
+
+  const drawingColors = ['#2962FF', '#f23645', '#089981', '#f59e0b', '#8b5cf6', '#ffffff']
+  const drawingWidths = [1, 2, 3, 4]
 
   return (
     <div className={`relative flex flex-col border ${isActive ? 'border-blue-500' : 'border-gray-800'} bg-chart-bg overflow-hidden`} onClick={() => setActiveChart(chartId)}>
@@ -350,14 +401,15 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
             <div ref={setContainerRef} className="absolute inset-0" />
             {chartApi && mainSeries && controllerRef.current && (
               <PluginDrawingLayer
+                ref={drawingLayerRef}
                 controller={controllerRef.current}
                 container={chartContainer}
                 activeTool={activeTool as any}
                 onToolSelect={onToolSelect}
-                onDrawingInteractionChange={(isInteracting) => {
-                  isDrawingInteractionRef.current = isInteracting
-                }}
+                onSelectedDrawingChange={setSelectedDrawing}
+                onDrawingInteractionChange={handleDrawingInteractionChange}
                 persistenceScope={drawingPersistenceScope}
+                timeframe={chart.timeframe}
                 magnetEnabled={magnetMode}
               />
             )}
@@ -374,6 +426,50 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
             )}
             {isActive && chartPanels.indicators && (
               <IndicatorsModal chartId={chartId} onClose={() => onChartPanelClose('indicators')} />
+            )}
+            {selectedDrawing && (
+              <div
+                className="absolute left-2 top-2 z-30 flex items-center gap-2 rounded border border-gray-800 bg-[#111827]/95 px-2 py-1 shadow-lg backdrop-blur-sm max-w-[calc(100%-16px)]"
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-[10px] uppercase text-gray-500">Drawing</span>
+                  <span className="max-w-24 truncate text-[11px] text-gray-200">{selectedDrawing.type}</span>
+                </div>
+                <div className="flex items-center gap-1">
+                  {drawingColors.map((color) => (
+                    <button
+                      key={color}
+                      type="button"
+                      title={color}
+                      onClick={() => drawingLayerRef.current?.updateSelectedStyle({ lineColor: color })}
+                      className={`h-5 w-5 rounded border ${selectedDrawing.lineColor.toLowerCase() === color.toLowerCase() ? 'border-white' : 'border-gray-700'}`}
+                      style={{ backgroundColor: color }}
+                    />
+                  ))}
+                </div>
+                <div className="flex items-center gap-1">
+                  {drawingWidths.map((width) => (
+                    <button
+                      key={width}
+                      type="button"
+                      onClick={() => drawingLayerRef.current?.updateSelectedStyle({ lineWidth: width })}
+                      className={`h-5 min-w-5 rounded border px-1 text-[10px] ${selectedDrawing.lineWidth === width ? 'border-blue-400 bg-blue-950/40 text-blue-200' : 'border-gray-700 text-gray-400 hover:text-white'}`}
+                    >
+                      {width}
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => drawingLayerRef.current?.deleteSelected()}
+                  className="inline-flex h-6 w-6 items-center justify-center rounded border border-red-900/70 text-red-300 hover:bg-red-950/60"
+                  title="Delete drawing"
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
             )}
           </div>
 

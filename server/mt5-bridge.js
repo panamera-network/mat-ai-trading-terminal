@@ -372,7 +372,11 @@ if (isMain) {
     const symbol = String(params.get('symbol') || '').trim().toUpperCase();
     const timeframe = normalizeHistoryTimeframe(params.get('timeframe'));
     const rawCount = params.get('count');
+    const rawFrom = params.get('from');
+    const rawTo = params.get('to');
     const count = rawCount === null ? HISTORY_DEFAULT_COUNT : Number(rawCount);
+    const from = rawFrom === null ? null : Number(rawFrom);
+    const to = rawTo === null ? null : Number(rawTo);
 
     if (!/^[A-Z0-9._-]{1,24}$/.test(symbol)) {
       return { ok: false, error: historyError('INVALID_REQUEST', 'Invalid history symbol') };
@@ -383,19 +387,35 @@ if (isMain) {
     if (!Number.isInteger(count) || count < 1) {
       return { ok: false, error: historyError('INVALID_REQUEST', 'Invalid history count') };
     }
+    if (rawFrom !== null && (!Number.isInteger(from) || from <= 0)) {
+      return { ok: false, error: historyError('INVALID_REQUEST', 'Invalid history from') };
+    }
+    if (rawTo !== null && (!Number.isInteger(to) || to <= 0)) {
+      return { ok: false, error: historyError('INVALID_REQUEST', 'Invalid history to') };
+    }
+    if ((from === null) !== (to === null)) {
+      return { ok: false, error: historyError('INVALID_REQUEST', 'History range requires from and to') };
+    }
+    if (from !== null && to !== null && from > to) {
+      return { ok: false, error: historyError('INVALID_REQUEST', 'History from must be before to') };
+    }
 
-    return { ok: true, value: { symbol, timeframe, count: Math.min(count, HISTORY_MAX_COUNT) } };
+    return { ok: true, value: { symbol, timeframe, count: Math.min(count, HISTORY_MAX_COUNT), from, to } };
   }
 
   function requestHistory(request) {
-    const key = historyKey(request.symbol, request.timeframe);
+    const key = historyKey(request);
+    const isRangeRequest = request.from !== null && request.to !== null;
     const cached = historyCache.get(key);
-    if (cached && Date.now() - cached.fetchedAt <= HISTORY_CACHE_TTL_MS && cached.count >= request.count) {
+    if (!isRangeRequest && cached && Date.now() - cached.fetchedAt <= HISTORY_CACHE_TTL_MS && cached.count >= request.count) {
       return Promise.resolve(toHistoryResponse(request, cached.candles.slice(-request.count)));
+    }
+    if (isRangeRequest && cached && Date.now() - cached.fetchedAt <= HISTORY_CACHE_TTL_MS) {
+      return Promise.resolve(toHistoryResponse(request, cached.candles));
     }
 
     const existing = historyRequests.get(key);
-    if (existing) return existing.promise.then((candles) => toHistoryResponse(request, candles.slice(-request.count)));
+    if (existing) return existing.promise.then((candles) => toHistoryResponse(request, isRangeRequest ? candles : candles.slice(-request.count)));
 
     if (bridge.clients.size === 0) {
       return Promise.reject(historyError('MT5_DISCONNECTED', 'MT5 client is not connected'));
@@ -420,9 +440,10 @@ if (isMain) {
     entry.resolve = (candles) => {
       clearTimeout(timeout);
       historyRequests.delete(key);
-      const normalized = normalizeHistoryCandles(candles).slice(-entry.count);
-      historyCache.set(key, { candles: normalized, count: normalized.length, fetchedAt: Date.now() });
-      entry.resolvePromise(normalized);
+      const normalized = normalizeHistoryCandles(candles);
+      const bounded = isRangeRequest ? normalized : normalized.slice(-entry.count);
+      historyCache.set(key, { candles: bounded, count: bounded.length, fetchedAt: Date.now() });
+      entry.resolvePromise(bounded);
     };
     entry.reject = (error) => {
       clearTimeout(timeout);
@@ -437,17 +458,18 @@ if (isMain) {
       symbol: request.symbol,
       timeframe: request.timeframe,
       count: request.count,
+      ...(isRangeRequest ? { from: request.from, to: request.to } : {}),
     });
     if (!sent) entry.reject(historyError('MT5_DISCONNECTED', 'MT5 client is not connected'));
 
-    return entry.promise.then((candles) => toHistoryResponse(request, candles.slice(-request.count)));
+    return entry.promise.then((candles) => toHistoryResponse(request, isRangeRequest ? candles : candles.slice(-request.count)));
   }
 
   function resolveHistoryMessage(msg) {
     const symbol = String(msg.symbol || '').trim().toUpperCase();
     const timeframe = normalizeHistoryTimeframe(msg.timeframe || msg.period);
     if (!symbol || !timeframe) return;
-    const entry = historyRequests.get(historyKey(symbol, timeframe));
+    const entry = findHistoryEntryBySymbolTimeframe(symbol, timeframe);
     if (!entry) return;
     entry.resolve(extractHistoryCandles(msg));
   }
@@ -479,7 +501,14 @@ if (isMain) {
     const symbol = String(msg.symbol || '').trim().toUpperCase();
     const timeframe = normalizeHistoryTimeframe(msg.timeframe || msg.period);
     if (!symbol || !timeframe) return null;
-    return historyRequests.get(historyKey(symbol, timeframe)) || null;
+    return findHistoryEntryBySymbolTimeframe(symbol, timeframe);
+  }
+
+  function findHistoryEntryBySymbolTimeframe(symbol, timeframe) {
+    for (const entry of historyRequests.values()) {
+      if (entry.symbol === symbol && entry.timeframe === timeframe) return entry;
+    }
+    return null;
   }
 
   function extractHistoryCandles(msg) {
@@ -554,12 +583,14 @@ if (isMain) {
     return error;
   }
 
-  function historyKey(symbol, timeframe) {
-    return `${symbol}:${timeframe}`;
+  function historyKey(request) {
+    const from = request.from ?? 'latest';
+    const to = request.to ?? 'latest';
+    return `${request.symbol}:${request.timeframe}:${from}:${to}:${request.count}`;
   }
 
   function makeHistoryRequestId(request) {
-    return `${historyKey(request.symbol, request.timeframe)}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
+    return `${historyKey(request)}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
   }
 
   function toHistoryNumber(value) {

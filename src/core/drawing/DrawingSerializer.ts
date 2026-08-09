@@ -141,6 +141,16 @@ export function createDrawingScopeKey(scope: DrawingPersistenceScope): string {
     scope.layoutId,
     scope.chartId,
     scope.symbol,
+    'all-timeframes',
+  ].map(encodeURIComponent).join(':')
+}
+
+export function createLegacyDrawingScopeKey(scope: DrawingPersistenceScope): string {
+  return [
+    scope.workspaceId || 'terminal',
+    scope.layoutId,
+    scope.chartId,
+    scope.symbol,
     scope.timeframe,
   ].map(encodeURIComponent).join(':')
 }
@@ -269,8 +279,7 @@ function scopesMatch(a: DrawingPersistenceScope, b: DrawingPersistenceScope): bo
     (a.workspaceId || 'terminal') === (b.workspaceId || 'terminal') &&
     a.layoutId === b.layoutId &&
     a.chartId === b.chartId &&
-    a.symbol === b.symbol &&
-    a.timeframe === b.timeframe
+    a.symbol === b.symbol
   )
 }
 
@@ -281,4 +290,3 @@ function toFiniteNumber(value: unknown): number | null {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object'
 }
-

@@ -94,6 +94,10 @@ export class TradingChartController {
     this.chartType = type
     this.mainSeries = this.createMainSeries(type)
     this.applyDataToSeries()
+    const context = this.getPluginContext()
+    if (context) {
+      this.plugins.forEach((plugin) => plugin.onSeriesChange?.(context))
+    }
     this.plugins.forEach((plugin) => plugin.setData?.(this.candles))
   }
 

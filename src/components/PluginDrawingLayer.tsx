@@ -1,11 +1,12 @@
-import { useEffect, useRef } from 'react'
+import { forwardRef, useEffect, useImperativeHandle, useRef } from 'react'
 import { TradingChartController } from '@/core/chart/TradingChartController'
 import {
+  DrawingSelectionInfo,
   DrawingRuntimePlugin,
   isDrawingRuntimeTool,
 } from '@/core/drawing/DrawingRuntimePlugin'
-import { DrawingPersistenceScope } from '@/core/drawing/DrawingModel'
-import { DrawingType } from '@/types'
+import { DrawingModel, DrawingPersistenceScope } from '@/core/drawing/DrawingModel'
+import { DrawingType, Timeframe } from '@/types'
 
 interface PluginDrawingLayerProps {
   controller: TradingChartController
@@ -13,24 +14,40 @@ interface PluginDrawingLayerProps {
   activeTool: DrawingType
   onToolSelect: (tool: string) => void
   onDrawingInteractionChange?: (isInteracting: boolean) => void
+  onSelectedDrawingChange?: (selection: DrawingSelectionInfo | null) => void
   persistenceScope: DrawingPersistenceScope
+  timeframe: Timeframe
   magnetEnabled: boolean
+}
+
+export interface PluginDrawingLayerHandle {
+  deleteSelected: () => void
+  exportDrawings: () => DrawingModel[]
+  updateSelectedStyle: (style: { lineColor?: string; lineWidth?: number }) => void
 }
 
 export function isPluginDrawingTool(tool: DrawingType | string): boolean {
   return isDrawingRuntimeTool(tool)
 }
 
-export default function PluginDrawingLayer({
+const PluginDrawingLayer = forwardRef<PluginDrawingLayerHandle, PluginDrawingLayerProps>(function PluginDrawingLayer({
   controller,
   container,
   activeTool,
   onToolSelect,
   onDrawingInteractionChange,
+  onSelectedDrawingChange,
   persistenceScope,
+  timeframe,
   magnetEnabled,
-}: PluginDrawingLayerProps) {
+}, ref) {
   const pluginRef = useRef<DrawingRuntimePlugin | null>(null)
+
+  useImperativeHandle(ref, () => ({
+    deleteSelected: () => pluginRef.current?.deleteSelected(),
+    exportDrawings: () => pluginRef.current?.exportDrawings() ?? [],
+    updateSelectedStyle: (style) => pluginRef.current?.updateSelectedStyle(style),
+  }), [])
 
   useEffect(() => {
     if (!container) return
@@ -38,6 +55,7 @@ export default function PluginDrawingLayer({
       container,
       onToolSelect,
       onDrawingInteractionChange,
+      onSelectedDrawingChange,
       persistenceScope,
       magnetEnabled,
     })
@@ -54,8 +72,9 @@ export default function PluginDrawingLayer({
     pluginRef.current?.setCallbacks({
       onToolSelect,
       onDrawingInteractionChange,
+      onSelectedDrawingChange,
     })
-  }, [onToolSelect, onDrawingInteractionChange])
+  }, [onToolSelect, onDrawingInteractionChange, onSelectedDrawingChange])
 
   useEffect(() => {
     pluginRef.current?.setActiveTool(activeTool)
@@ -66,8 +85,14 @@ export default function PluginDrawingLayer({
   }, [persistenceScope])
 
   useEffect(() => {
+    pluginRef.current?.setTimeframe(timeframe)
+  }, [timeframe])
+
+  useEffect(() => {
     pluginRef.current?.setMagnetEnabled(magnetEnabled)
   }, [magnetEnabled])
 
   return null
-}
+})
+
+export default PluginDrawingLayer

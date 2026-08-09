@@ -30,6 +30,11 @@ interface BridgeHistoryResponse {
 const historyCache = new Map<string, BridgeHistoryCacheEntry>()
 const inFlightHistory = new Map<string, Promise<CandleData[]>>()
 
+interface BridgeHistoryRange {
+  from: number
+  to: number
+}
+
 export function requestBridgeHistory(
   symbol: Symbol,
   timeframe: Timeframe,
@@ -63,6 +68,46 @@ export function requestBridgeHistory(
 
   inFlightHistory.set(key, request)
   return request.then((candles) => candles.slice(-boundedCount))
+}
+
+export function requestBridgeHistoryRange(
+  symbol: Symbol,
+  timeframe: Timeframe,
+  range: BridgeHistoryRange
+): Promise<CandleData[]> {
+  if (symbol.exchange !== 'mt5') return Promise.resolve([])
+
+  const from = Math.floor(range.from)
+  const to = Math.floor(range.to)
+  if (!Number.isFinite(from) || !Number.isFinite(to) || from <= 0 || to <= 0 || from > to) {
+    return Promise.resolve([])
+  }
+
+  const key = `${symbol.exchange}:${symbol.id.toUpperCase()}:${timeframe}:range:${from}:${to}`
+  const cached = historyCache.get(key)
+  if (cached && Date.now() - cached.fetchedAt <= HISTORY_CACHE_TTL_MS) {
+    return Promise.resolve(cached.candles)
+  }
+
+  const existing = inFlightHistory.get(key)
+  if (existing) return existing
+
+  const request = fetch(
+    `${BRIDGE_URL}/history?symbol=${encodeURIComponent(symbol.id)}&timeframe=${encodeURIComponent(timeframe)}&from=${from}&to=${to}`
+  )
+    .then(async (res) => {
+      const body = await res.json().catch(() => null) as BridgeHistoryResponse | null
+      if (!res.ok || !body?.ok) throw new Error(body?.message || `History range request failed: ${res.status}`)
+      const normalized = normalizeHistoryCandles(body.candles ?? [])
+      historyCache.set(key, { candles: normalized, fetchedAt: Date.now() })
+      return normalized
+    })
+    .finally(() => {
+      inFlightHistory.delete(key)
+    })
+
+  inFlightHistory.set(key, request)
+  return request
 }
 
 export function getBridgeHistoryCount(timeframe: Timeframe): number {

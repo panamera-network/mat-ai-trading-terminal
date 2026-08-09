@@ -1,6 +1,7 @@
 import { DrawingModel, DrawingPersistenceScope } from '@/core/drawing/DrawingModel'
 import {
   createDrawingScopeKey,
+  createLegacyDrawingScopeKey,
   migrateDrawingPayload,
   parseDrawingSet,
   serializeDrawingSet,
@@ -19,9 +20,14 @@ export class DrawingPersistenceEngine {
   async load(scope: DrawingPersistenceScope): Promise<DrawingModel[]> {
     if (this.destroyed) return []
     const payload = await this.adapter.load(this.getScopeKey(scope))
+      || await this.adapter.load(createLegacyDrawingScopeKey(scope))
     if (!payload || this.destroyed) return []
     const drawingSet = parseDrawingSet(payload, scope)
-    return drawingSet?.drawings || []
+    const drawings = drawingSet?.drawings || []
+    if (drawings.length > 0 && payload) {
+      await this.save(scope, drawings)
+    }
+    return drawings
   }
 
   async save(scope: DrawingPersistenceScope, drawings: readonly DrawingModel[]): Promise<void> {
@@ -43,4 +49,3 @@ export class DrawingPersistenceEngine {
     this.destroyed = true
   }
 }
-
