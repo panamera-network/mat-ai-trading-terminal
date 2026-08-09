@@ -9,6 +9,7 @@ const SECONDS_BY_TIMEFRAME: Partial<Record<Timeframe, number>> = {
   '1m': 60,
   '5m': 5 * 60,
   '15m': 15 * 60,
+  '30m': 30 * 60,
   '1H': 60 * 60,
   '4H': 4 * 60 * 60,
   '1D': 24 * 60 * 60,
@@ -34,6 +35,7 @@ export const utcMTFBoundaryResolver: MTFBoundaryResolver = {
       case '1m':
       case '5m':
       case '15m':
+      case '30m':
       case '1H':
       case '4H': {
         const seconds = SECONDS_BY_TIMEFRAME[targetTimeframe]

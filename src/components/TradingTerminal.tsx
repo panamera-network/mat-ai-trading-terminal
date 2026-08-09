@@ -129,7 +129,7 @@ export default function TradingTerminal() {
               {ALL_SYMBOLS.map((s) => <option key={s.id} value={s.id}>{s.name}</option>)}
             </select>
             <select value={panelChart.timeframe} onChange={(e) => handleTimeframeChange(e.target.value as Timeframe)} disabled={isBacktestMode} className="bg-[#1e222d] text-white text-xs px-2 py-1 rounded border border-gray-700 outline-none disabled:opacity-50">
-              {['1m', '5m', '15m', '1H', '4H', '1D', '1W'].map((tf) => <option key={tf} value={tf}>{tf}</option>)}
+              {['1m', '5m', '15m', '30m', '1H', '4H', '1D', '1W'].map((tf) => <option key={tf} value={tf}>{tf}</option>)}
             </select>
             <select value={panelChart.chartType} onChange={(e) => handleChartTypeChange(e.target.value as ChartType)} className="bg-[#1e222d] text-white text-xs px-2 py-1 rounded border border-gray-700 outline-none">
               <option value="candlestick">Candles</option>

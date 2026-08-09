@@ -3,7 +3,7 @@ import { useBacktestStore } from '@/stores/backtestStore'
 import { generateMockData } from '@/services/dataLoader'
 import { ALL_SYMBOLS } from '@/types/market'
 
-const TIMEFRAMES = ['1m', '5m', '15m', '1H', '4H', '1D']
+const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1H', '4H', '1D']
 const DURATION_OPTIONS = [
   { label: '1 Week', days: 7 },
   { label: '1 Month', days: 30 },
@@ -19,7 +19,7 @@ interface BacktestSetupProps {
 
 export default function BacktestSetup({ variant = 'modal', onClose }: BacktestSetupProps) {
   const { enterBacktestMode, loadData } = useBacktestStore()
-  const [symbolId, setSymbolId] = useState('EURUSD')
+  const [symbolId, setSymbolId] = useState('XAUUSD')
   const [timeframe, setTimeframe] = useState('1H')
   const [duration, setDuration] = useState(30)
   const [initialBalance, setInitialBalance] = useState(10000)

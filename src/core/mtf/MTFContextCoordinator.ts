@@ -25,6 +25,7 @@ const TIMEFRAME_RANK: Record<Timeframe, number> = {
   '1m': 1,
   '5m': 5,
   '15m': 15,
+  '30m': 30,
   '1H': 60,
   '4H': 240,
   '1D': 1440,

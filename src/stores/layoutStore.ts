@@ -542,9 +542,10 @@ function createDefaultChart(
   timeframe?: Timeframe,
   chartType?: ChartType
 ): ChartInstance {
+  const defaultSymbol = ALL_SYMBOLS.find((item) => item.id === 'XAUUSD') || ALL_SYMBOLS[0]
   return {
     id: id || nanoid(6),
-    symbol: symbol || ALL_SYMBOLS[0],  // ← EURUSD object
+    symbol: symbol || defaultSymbol,
     timeframe: timeframe || '1H',
     chartType: chartType || 'candlestick',
     drawings: [],

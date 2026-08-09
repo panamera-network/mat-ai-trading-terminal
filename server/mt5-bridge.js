@@ -8,9 +8,9 @@ const PORT = process.env.MT5_BRIDGE_PORT || 5555;
 const HOST = process.env.MT5_BRIDGE_HOST || '0.0.0.0';
 const HISTORY_TIMEOUT_MS = 7000;
 const HISTORY_CACHE_TTL_MS = 15000;
-const HISTORY_MAX_COUNT = 100;
+const HISTORY_MAX_COUNT = 1000;
 const HISTORY_DEFAULT_COUNT = 10;
-const SUPPORTED_HISTORY_TIMEFRAMES = new Set(['1m', '5m', '15m', '1H', '4H', '1D', '1W']);
+const SUPPORTED_HISTORY_TIMEFRAMES = new Set(['1m', '5m', '15m', '30m', '1H', '4H', '1D', '1W']);
 
 class MT5Bridge extends EventEmitter {
   constructor() {
@@ -145,6 +145,10 @@ class MT5Bridge extends EventEmitter {
         this.emit('mt5Error', msg);
         break;
 
+      case 'disconnect':
+        socket.end();
+        break;
+
       default:
         console.log('[MT5] Unknown:', msg.type);
     }
@@ -277,7 +281,17 @@ if (isMain) {
       return;
     }
 
-    if (req.url === '/status') {
+    if (req.url === '/' || req.url === '/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        ok: true,
+        service: 'MAT.ai MT5 bridge',
+        tcpPort: Number(PORT),
+        httpPort: 5556,
+        endpoints: ['/status', '/latest', '/ticks', '/account', '/history', '/command'],
+      }));
+    }
+    else if (req.url === '/status') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         connected: bridge.clients.size > 0,
@@ -330,6 +344,7 @@ if (isMain) {
     console.log('  GET  /status   — connection status');
     console.log('  GET  /ticks    — latest ticks');
     console.log('  GET  /account  — account info');
+    console.log('  GET  /health   — bridge metadata');
     console.log('  GET  /latest   — ticks + account combined (used by frontend poller)');
     console.log('  POST /command  — send command to MT5');
   });
@@ -511,8 +526,9 @@ if (isMain) {
   function normalizeHistoryTimeframe(value) {
     const raw = String(value || '').trim();
     const aliases = {
-      M1: '1m', M5: '5m', M15: '15m',
+      M1: '1m', M5: '5m', M15: '15m', M30: '30m',
       H1: '1H', H4: '4H', D1: '1D', W1: '1W',
+      '30M': '30m',
       '1h': '1H', '4h': '4H', '1d': '1D', '1w': '1W',
     };
     const normalized = aliases[raw] || raw;

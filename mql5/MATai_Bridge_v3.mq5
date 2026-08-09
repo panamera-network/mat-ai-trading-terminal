@@ -886,7 +886,7 @@ void HandleGetHistory(string jsonStr)
 
    if(count <= 0)
       count = 10;
-   count = MathMin(count, 100);
+   count = MathMin(count, 1000);
 
    ENUM_TIMEFRAMES timeframe;
    if(!TryStringToTimeframe(timeframeText, timeframe))

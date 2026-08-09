@@ -3,9 +3,8 @@ import { CandleData, Symbol, Timeframe } from '@/types'
 import { useLayoutStore } from '@/stores/layoutStore'
 import { useOrderStore } from '@/stores/orderStore'
 import { createTradingFeed, TradingFeed } from '@/core/feed/tradingFeed'
-import { requestBridgeHistory } from '@/core/feed/BridgeHistoryClient'
-
-const MAIN_HISTORY_COUNT = 100
+import { getBridgeHistoryCount, requestBridgeHistory } from '@/core/feed/BridgeHistoryClient'
+import { requestBridgeSymbolStatus } from '@/core/feed/BridgeStatusClient'
 
 export function useRealtimeFeed(
   chartId: string,
@@ -21,6 +20,7 @@ export function useRealtimeFeed(
   const subscriptionIdRef = useRef<string | null>(null)
   const subscriptionGenerationRef = useRef(0)
   const [isConnected, setIsConnected] = useState(false)
+  const [symbolStatus, setSymbolStatus] = useState<'checking' | 'available' | 'unavailable'>('checking')
 
   const handleCandle = useCallback(
     (candle: CandleData) => {
@@ -51,6 +51,7 @@ export function useRealtimeFeed(
     feedRef.current = feed
     const generation = subscriptionGenerationRef.current + 1
     subscriptionGenerationRef.current = generation
+    setSymbolStatus(symbol.exchange === 'mt5' ? 'checking' : 'available')
 
     const unsubscribe = feed.subscribe({
       chartId,
@@ -75,8 +76,15 @@ export function useRealtimeFeed(
     subscriptionIdRef.current = `${chartId}_${symbol.id}_${timeframe}_${generation}`
 
     if (symbol.exchange === 'mt5') {
-      requestBridgeHistory(symbol, timeframe, MAIN_HISTORY_COUNT)
+      requestBridgeSymbolStatus(symbol)
+        .then((status) => {
+          if (subscriptionGenerationRef.current !== generation) return
+          setSymbolStatus(status.available ? 'available' : 'unavailable')
+          if (!status.available) throw new Error(`MT5 symbol not exposed by bridge: ${symbol.id}`)
+          return requestBridgeHistory(symbol, timeframe, getBridgeHistoryCount(timeframe))
+        })
         .then((candles) => {
+          if (!candles) return
           if (subscriptionGenerationRef.current !== generation || candles.length === 0) return
           updateChartData(chartId, candles)
           const last = candles[candles.length - 1]
@@ -97,6 +105,7 @@ export function useRealtimeFeed(
 
   return {
     isConnected,
+    symbolStatus,
     getPrices: () => {
       if (symbol.exchange === 'mt5' && subscriptionIdRef.current) {
         return feedRef.current?.getCurrentPrices?.() ?? { bid: 0, ask: 0, mid: 0, spread: 0 }

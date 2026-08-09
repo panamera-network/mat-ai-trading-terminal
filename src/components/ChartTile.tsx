@@ -70,7 +70,7 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
   const backtestState = useBacktestStore((s) => s.state)
   const backtestData = useBacktestStore((s) => s.data)
 
-  const { isConnected, getPrices } = useRealtimeFeed(chartId, chart.symbol, chart.timeframe)
+  const { isConnected, symbolStatus, getPrices } = useRealtimeFeed(chartId, chart.symbol, chart.timeframe)
   const prices = getPrices()
 
   const placeOrder = useOrderStore((s) => s.placeOrder)
@@ -305,6 +305,11 @@ export default function ChartTile({ chartId, isActive, activeTool, onToolSelect,
           <span className={`text-[10px] px-1.5 py-0.5 rounded border ${isBacktestMode ? 'bg-purple-900/40 text-purple-300 border-purple-800' : 'bg-emerald-900/30 text-emerald-300 border-emerald-800'}`}>
             {isBacktestMode ? 'BT' : 'LIVE'}
           </span>
+          {!isBacktestMode && symbolStatus === 'unavailable' && (
+            <span className="text-[10px] px-1.5 py-0.5 rounded border bg-red-950/50 text-red-300 border-red-900">
+              SYMBOL OFFLINE
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-3 min-w-0">

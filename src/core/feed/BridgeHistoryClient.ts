@@ -4,6 +4,16 @@ import { prepareCandles } from '@/core/mtf/MTFAggregationEngine'
 
 const BRIDGE_URL = 'http://localhost:5556'
 const HISTORY_CACHE_TTL_MS = 15000
+const HISTORY_COUNT_BY_TIMEFRAME: Record<Timeframe, number> = {
+  '1m': 1000,
+  '5m': 800,
+  '15m': 800,
+  '30m': 500,
+  '1H': 500,
+  '4H': 300,
+  '1D': 250,
+  '1W': 250,
+}
 
 interface BridgeHistoryCacheEntry {
   candles: CandleData[]
@@ -23,11 +33,11 @@ const inFlightHistory = new Map<string, Promise<CandleData[]>>()
 export function requestBridgeHistory(
   symbol: Symbol,
   timeframe: Timeframe,
-  count: number
+  count = getBridgeHistoryCount(timeframe)
 ): Promise<CandleData[]> {
   if (symbol.exchange !== 'mt5') return Promise.resolve([])
 
-  const boundedCount = Math.min(Math.max(1, Math.floor(count)), 100)
+  const boundedCount = Math.min(Math.max(1, Math.floor(count)), 1000)
   const key = `${symbol.exchange}:${symbol.id.toUpperCase()}:${timeframe}`
   const cached = historyCache.get(key)
   if (cached && Date.now() - cached.fetchedAt <= HISTORY_CACHE_TTL_MS && cached.candles.length >= boundedCount) {
@@ -53,6 +63,10 @@ export function requestBridgeHistory(
 
   inFlightHistory.set(key, request)
   return request.then((candles) => candles.slice(-boundedCount))
+}
+
+export function getBridgeHistoryCount(timeframe: Timeframe): number {
+  return HISTORY_COUNT_BY_TIMEFRAME[timeframe] ?? 100
 }
 
 function normalizeHistoryCandles(candles: readonly CandleData[]): CandleData[] {

@@ -106,7 +106,7 @@ export class BinanceFeed {
 
   private mapTimeframe(tf: string): string {
     const map: Record<string, string> = {
-      '1m': '1m', '5m': '5m', '15m': '15m',
+      '1m': '1m', '5m': '5m', '15m': '15m', '30m': '30m',
       '1H': '1h', '4H': '4h', '1D': '1d', '1W': '1w',
     }
     return map[tf] || '1h'

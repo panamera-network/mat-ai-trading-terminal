@@ -16,6 +16,7 @@ const BAR_DAYS: Record<Timeframe, number> = {
   '1m': (TARGET_BARS * 1) / (24 * 60),
   '5m': (TARGET_BARS * 5) / (24 * 60),
   '15m': (TARGET_BARS * 15) / (24 * 60),
+  '30m': (TARGET_BARS * 30) / (24 * 60),
   '1H': (TARGET_BARS * 1) / 24,
   '4H': (TARGET_BARS * 4) / 24,
   '1D': TARGET_BARS * 1,

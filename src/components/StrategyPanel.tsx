@@ -2,14 +2,14 @@ import { useState } from 'react'
 import { useStrategyStore, PRESET_STRATEGIES } from '@/stores/strategyStore'
 import { ALL_SYMBOLS } from '@/types/market'
 
-const TIMEFRAMES = ['1m', '5m', '15m', '1H', '4H', '1D']
+const TIMEFRAMES = ['1m', '5m', '15m', '30m', '1H', '4H', '1D']
 
 export default function StrategyPanel() {
   const { scripts, activeScriptId, logs, createScript, updateScript, deleteScript, setActiveScript, toggleScript, clearLogs } = useStrategyStore()
   const [isEditing, setIsEditing] = useState(false)
   const [editName, setEditName] = useState('')
   const [editCode, setEditCode] = useState('')
-  const [editSymbol, setEditSymbol] = useState('EURUSD')
+  const [editSymbol, setEditSymbol] = useState('XAUUSD')
   const [editTimeframe, setEditTimeframe] = useState('1H')
   const [showPresets, setShowPresets] = useState(false)
 
