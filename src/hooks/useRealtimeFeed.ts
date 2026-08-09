@@ -3,6 +3,9 @@ import { CandleData, Symbol, Timeframe } from '@/types'
 import { useLayoutStore } from '@/stores/layoutStore'
 import { useOrderStore } from '@/stores/orderStore'
 import { createTradingFeed, TradingFeed } from '@/core/feed/tradingFeed'
+import { requestBridgeHistory } from '@/core/feed/BridgeHistoryClient'
+
+const MAIN_HISTORY_COUNT = 100
 
 export function useRealtimeFeed(
   chartId: string,
@@ -10,6 +13,7 @@ export function useRealtimeFeed(
   timeframe: Timeframe
 ) {
   const appendCandle = useLayoutStore((s) => s.appendCandle)
+  const updateChartData = useLayoutStore((s) => s.updateChartData)
   const updateLastPrice = useLayoutStore((s) => s.updateLastPrice)
   const updatePositions = useOrderStore((s) => s.updatePositions)
   const checkPendingOrders = useOrderStore((s) => s.checkPendingOrders)
@@ -70,12 +74,26 @@ export function useRealtimeFeed(
     })
     subscriptionIdRef.current = `${chartId}_${symbol.id}_${timeframe}_${generation}`
 
+    if (symbol.exchange === 'mt5') {
+      requestBridgeHistory(symbol, timeframe, MAIN_HISTORY_COUNT)
+        .then((candles) => {
+          if (subscriptionGenerationRef.current !== generation || candles.length === 0) return
+          updateChartData(chartId, candles)
+          const last = candles[candles.length - 1]
+          updateLastPrice(chartId, last.close, last.close - last.open, 0)
+        })
+        .catch((err) => {
+          if (subscriptionGenerationRef.current !== generation) return
+          console.warn(`[Feed] History unavailable: ${symbol.id} ${timeframe}`, err)
+        })
+    }
+
     return () => {
       unsubscribe()
       subscriptionIdRef.current = null
       setIsConnected(false)
     }
-  }, [chartId, symbol, symbol.id, symbol.exchange, timeframe, handleCandle])
+  }, [chartId, symbol, symbol.id, symbol.exchange, timeframe, handleCandle, updateChartData, updateLastPrice])
 
   return {
     isConnected,

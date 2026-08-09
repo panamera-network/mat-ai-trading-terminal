@@ -137,10 +137,14 @@ export const useLayoutStore = create<LayoutStore>((set, get) => ({
         charts: state.layout.charts.map((c) => {
           if (c.id !== chartId) return c
           const last = c.data[c.data.length - 1]
-          if (last && last.time === candle.time) {
-            return { ...c, data: [...c.data.slice(0, -1), candle] }
+          const lastTime = getCandleTime(last?.time)
+          const nextTime = getCandleTime(candle.time)
+          if (nextTime === null) return c
+          if (lastTime !== null && nextTime < lastTime) return c
+          if (lastTime !== null && nextTime === lastTime) {
+            return { ...c, data: [...c.data.slice(0, -1), { ...candle, time: nextTime }] }
           }
-          return { ...c, data: [...c.data, candle] }
+          return { ...c, data: [...c.data, { ...candle, time: nextTime }].slice(-5000) }
         }),
       },
     }))
@@ -510,6 +514,27 @@ export const useLayoutStore = create<LayoutStore>((set, get) => ({
 
   toggleMagnetMode: () => set((state) => ({ magnetMode: !state.magnetMode })),
 }))
+
+function getCandleTime(time: unknown): number | null {
+  if (typeof time === 'number' && Number.isFinite(time)) return time
+  if (typeof time === 'string') {
+    const numeric = Number(time)
+    if (Number.isFinite(numeric)) return numeric
+    const parsed = Date.parse(time)
+    return Number.isNaN(parsed) ? null : Math.floor(parsed / 1000)
+  }
+  if (time && typeof time === 'object') {
+    const maybeDate = time as { year?: unknown; month?: unknown; day?: unknown }
+    if (
+      typeof maybeDate.year === 'number' &&
+      typeof maybeDate.month === 'number' &&
+      typeof maybeDate.day === 'number'
+    ) {
+      return Date.UTC(maybeDate.year, maybeDate.month - 1, maybeDate.day) / 1000
+    }
+  }
+  return null
+}
 
 function createDefaultChart(
   id?: string,

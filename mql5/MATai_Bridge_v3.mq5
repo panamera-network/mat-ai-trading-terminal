@@ -5,34 +5,42 @@
 //+------------------------------------------------------------------+
 #property copyright "MAT.ai"
 #property link      "https://mat.ai"
-#property version   "2.0"
+#property version   "3.0"
 #property strict
 
 //--- Input Parameters
-input string   InpServerHost = "127.0.0.1";    // Server Host
-input int      InpServerPort = 5555;           // Server Port
-input int      InpReconnectInterval = 5000;    // Reconnect Interval (ms)
-input int      InpHeartbeatInterval = 30000;   // Heartbeat Interval (ms)
-input int      InpTickInterval = 100;          // Tick Send Interval (ms)
-input int      InpSocketTimeout = 5000;        // Socket Timeout (ms)
-input string   InpSymbols = "EURUSD,GBPUSD,USDJPY,AUDUSD,USDCAD"; // Symbols to stream
-input int      InpHistoryBars = 500;           // History bars to send on connect
-input bool     InpDebugMode = false;           // Debug Mode
+input string   InpServerHost = "127.0.0.1";    // TCP bridge host
+input int      InpServerPort = 5555;           // TCP bridge port
+input int      InpTimerInterval = 100;         // Runtime timer interval (ms)
+input int      InpReconnectInterval = 5000;    // Reconnect interval (ms)
+input int      InpHeartbeatInterval = 30000;   // Heartbeat interval (ms)
+input int      InpTickInterval = 100;          // Tick send interval (ms)
+input int      InpSocketConnectTimeout = 3000; // Socket connect timeout (ms)
+input int      InpSocketReadTimeout = 5;       // Short non-blocking-style read timeout (ms)
+input int      InpSocketSendTimeout = 1000;    // Socket send timeout (ms)
+input string   InpSymbols = "XAUUSD";          // Canonical terminal symbols
+input string   InpSymbolAliases = "XAUUSD=XAUUSD_i"; // Canonical=broker mappings
+input int      InpHistoryBars = 500;           // Initial history bars
+input bool     InpSendInitialHistory = false;  // Avoid unnecessary startup history flood
+input bool     InpDebugMode = false;            // Debug mode
 
 //--- Socket Handle
 int g_socket = INVALID_HANDLE;
 bool g_connected = false;
-datetime g_lastReconnect = 0;
-datetime g_lastHeartbeat = 0;
+uint g_lastReconnect = 0;
+uint g_lastHeartbeat = 0;
 uint g_lastTickSend = 0;
 
 //--- Symbol tracking
-string g_symbols[];
+string g_symbols[];          // canonical/request symbols
+string g_resolvedSymbols[];  // exact broker symbols
 int g_symbolCount = 0;
 
 //--- Rate limiters
 datetime g_lastBarTime[];
 bool g_newBar[];
+string g_lastTickPayload[];
+string g_lastBarPayload[];
 
 //--- Buffer for incoming commands
 string g_recvBuffer = "";
@@ -45,97 +53,105 @@ string g_recvBuffer = "";
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   Print("=== MAT.ai Bridge v2.0 Starting ===");
-   Print("Server: ", InpServerHost, ":", InpServerPort);
-   
-   // Parse symbols
+   Print("=== MAT.ai Bridge v3.0 Starting ===");
+   Print("TCP Server: ", InpServerHost, ":", InpServerPort);
+
    ParseSymbols();
-   
-   // Initialize arrays
+
    ArrayResize(g_lastBarTime, g_symbolCount);
    ArrayResize(g_newBar, g_symbolCount);
+   ArrayResize(g_lastTickPayload, g_symbolCount);
+   ArrayResize(g_lastBarPayload, g_symbolCount);
+
    for(int i = 0; i < g_symbolCount; i++)
    {
       g_lastBarTime[i] = 0;
       g_newBar[i] = false;
-   }
-   
-   // Subscribe to all symbols
-   for(int i = 0; i < g_symbolCount; i++)
-   {
-      if(!SymbolSelect(g_symbols[i], true))
+      g_lastTickPayload[i] = "";
+      g_lastBarPayload[i] = "";
+
+      if(StringLen(g_resolvedSymbols[i]) == 0)
       {
-         Print("Failed to select symbol: ", g_symbols[i]);
+         Print("Unresolved symbol: ", g_symbols[i]);
+         continue;
       }
+
+      if(!SymbolSelect(g_resolvedSymbols[i], true))
+         Print("Failed to select broker symbol: ", g_resolvedSymbols[i]);
       else
-      {
-         Print("Subscribed to: ", g_symbols[i]);
-      }
+         Print("Symbol mapped: ", g_symbols[i], " -> ", g_resolvedSymbols[i]);
    }
-   
-   // Initial connection attempt
-   if(!ConnectToServer())
+
+   if(!EventSetMillisecondTimer(MathMax(50, InpTimerInterval)))
    {
-      Print("Initial connection failed, will retry...");
+      Print("EventSetMillisecondTimer failed: ", GetLastError());
+      return INIT_FAILED;
    }
-   
-   return(INIT_SUCCEEDED);
+
+   // Timer owns reconnects and command processing. It does not depend on market ticks.
+   ConnectToServer();
+   return INIT_SUCCEEDED;
 }
 
 //+------------------------------------------------------------------+
-//| Expert deinitialization function                                   |
+//| Expert deinitialization function                                  |
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason)
 {
+   EventKillTimer();
    Print("=== MAT.ai Bridge Shutting Down ===");
    DisconnectFromServer();
 }
 
 //+------------------------------------------------------------------+
-//| Expert tick function                                               |
+//| Timer-driven runtime                                               |
 //+------------------------------------------------------------------+
-void OnTick()
+void OnTimer()
 {
-   // Check connection and reconnect if needed
+   uint nowMs = GetTickCount();
+
    if(!g_connected)
    {
-      datetime now = TimeLocal();
-      if(now - g_lastReconnect >= InpReconnectInterval / 1000)
+      if(nowMs - g_lastReconnect >= (uint)MathMax(1000, InpReconnectInterval))
       {
+         g_lastReconnect = nowMs;
          ConnectToServer();
-         g_lastReconnect = now;
       }
       return;
    }
-   
-   // Send heartbeat
-   datetime now = TimeLocal();
-   if(now - g_lastHeartbeat >= InpHeartbeatInterval / 1000)
+
+   if(g_socket == INVALID_HANDLE || !SocketIsConnected(g_socket))
+   {
+      MarkDisconnected("Socket connection lost");
+      return;
+   }
+
+   ProcessIncomingCommands();
+
+   if(nowMs - g_lastHeartbeat >= (uint)MathMax(1000, InpHeartbeatInterval))
    {
       SendHeartbeat();
-      g_lastHeartbeat = now;
+      g_lastHeartbeat = nowMs;
    }
-   
-   // Process incoming commands
-   ProcessIncomingCommands();
-   
-   // Send tick data for all symbols (rate limited)
-   if(GetTickCount() - g_lastTickSend >= (uint)InpTickInterval)
+
+   if(nowMs - g_lastTickSend >= (uint)MathMax(50, InpTickInterval))
    {
       SendTickData();
-      g_lastTickSend = GetTickCount();
+      CheckNewBars();
+      g_lastTickSend = nowMs;
    }
-   
-   // Check for new bars and send
-   CheckNewBars();
-   
-   // Send account info periodically
-   static datetime lastAccountSend = 0;
-   if(now - lastAccountSend >= 5) // Every 5 seconds
+
+   static uint lastAccountSend = 0;
+   if(nowMs - lastAccountSend >= 5000)
    {
       SendAccountInfo();
-      lastAccountSend = now;
+      lastAccountSend = nowMs;
    }
+}
+
+// OnTick intentionally remains empty. Runtime must continue when the market is quiet.
+void OnTick()
+{
 }
 
 //+------------------------------------------------------------------+
@@ -143,22 +159,28 @@ void OnTick()
 //+------------------------------------------------------------------+
 void ParseSymbols()
 {
-   string sym = InpSymbols;
-   string sep = ",";
-   ushort u_sep = StringGetCharacter(sep, 0);
-   
    string result[];
-   int k = StringSplit(sym, u_sep, result);
-   
-   if(k > 0)
+   ushort separator = StringGetCharacter(",", 0);
+   int count = StringSplit(InpSymbols, separator, result);
+
+   if(count <= 0)
    {
-      g_symbolCount = k;
-      ArrayResize(g_symbols, g_symbolCount);
-      for(int i = 0; i < k; i++)
-      {
-         g_symbols[i] = result[i];
-         Print("Symbol[", i, "]: ", g_symbols[i]);
-      }
+      g_symbolCount = 0;
+      return;
+   }
+
+   g_symbolCount = count;
+   ArrayResize(g_symbols, count);
+   ArrayResize(g_resolvedSymbols, count);
+
+   for(int i = 0; i < count; i++)
+   {
+      string canonical = result[i];
+      StringTrimLeft(canonical);
+      StringTrimRight(canonical);
+
+      g_symbols[i] = canonical;
+      g_resolvedSymbols[i] = ResolveBrokerSymbol(canonical);
    }
 }
 
@@ -172,42 +194,72 @@ bool ConnectToServer()
       SocketClose(g_socket);
       g_socket = INVALID_HANDLE;
    }
-   
+
+   ResetLastError();
    Print("Connecting to ", InpServerHost, ":", InpServerPort, "...");
-   
+
    g_socket = SocketCreate();
    if(g_socket == INVALID_HANDLE)
    {
       Print("SocketCreate failed: ", GetLastError());
       return false;
    }
-   
-   // Set socket options
-   SocketTimeouts(g_socket, InpSocketTimeout, InpSocketTimeout);
-   
-   // SocketConnect needs 4 params in some builds: socket, host, port, timeout
-   if(!SocketConnect(g_socket, InpServerHost, InpServerPort, InpSocketTimeout))
+
+   SocketTimeouts(
+      g_socket,
+      MathMax(1, InpSocketReadTimeout),
+      MathMax(100, InpSocketSendTimeout)
+   );
+
+   if(!SocketConnect(
+      g_socket,
+      InpServerHost,
+      InpServerPort,
+      MathMax(500, InpSocketConnectTimeout)
+   ))
    {
       int err = GetLastError();
-      Print("SocketConnect failed: ", err);
+      Print("SocketConnect failed: ", err,
+            ". Confirm TCP port and MT5 socket permissions.");
       SocketClose(g_socket);
       g_socket = INVALID_HANDLE;
+      g_connected = false;
       return false;
    }
-   
+
    g_connected = true;
-   Print("Connected to server!");
-   
-   // Send initial handshake
+   g_recvBuffer = "";
+   g_lastHeartbeat = GetTickCount();
+   g_lastTickSend = GetTickCount();
+
+   Print("Connected to MAT bridge");
    SendHandshake();
-   
-   // Send historical data for all symbols
-   for(int i = 0; i < g_symbolCount; i++)
+
+   if(InpSendInitialHistory)
    {
-      SendHistory(g_symbols[i]);
+      for(int i = 0; i < g_symbolCount; i++)
+      {
+         if(StringLen(g_resolvedSymbols[i]) > 0)
+            SendHistory(g_symbols[i]);
+      }
    }
-   
+
    return true;
+}
+
+void MarkDisconnected(string reason)
+{
+   if(StringLen(reason) > 0)
+      Print(reason);
+
+   if(g_socket != INVALID_HANDLE)
+   {
+      SocketClose(g_socket);
+      g_socket = INVALID_HANDLE;
+   }
+
+   g_connected = false;
+   g_recvBuffer = "";
 }
 
 //+------------------------------------------------------------------+
@@ -215,20 +267,10 @@ bool ConnectToServer()
 //+------------------------------------------------------------------+
 void DisconnectFromServer()
 {
-   if(g_socket != INVALID_HANDLE)
-   {
-      if(g_connected)
-      {
-         // Send disconnect message
-         string msg = "{\"type\":\"disconnect\",\"reason\":\"shutdown\"}\n";
-         SendString(msg);
-      }
-      
-      SocketClose(g_socket);
-      g_socket = INVALID_HANDLE;
-   }
-   g_connected = false;
-   Print("Disconnected from server");
+   if(g_socket != INVALID_HANDLE && g_connected)
+      SendString("{\"type\":\"disconnect\",\"reason\":\"shutdown\"}\n");
+
+   MarkDisconnected("Disconnected from server");
 }
 
 //+------------------------------------------------------------------+
@@ -238,22 +280,44 @@ bool SendString(string msg)
 {
    if(g_socket == INVALID_HANDLE || !g_connected)
       return false;
+
+   ResetLastError();
+   if(!SocketIsWritable(g_socket))
+   {
+      int writableErr = GetLastError();
+      Print("Socket is not writable: ", writableErr);
+      MarkDisconnected("Socket send failed");
+      return false;
+   }
    
-   uchar data[];  // <-- was char[], change to uchar[]
+   uchar data[];
    int len = StringLen(msg);
    ArrayResize(data, len);
    for(int i = 0; i < len; i++)
    {
       data[i] = (uchar)StringGetCharacter(msg, i);
    }
-   
-   int sent = SocketSend(g_socket, data, len);
-   if(sent <= 0)
+
+   int totalSent = 0;
+   while(totalSent < len)
    {
-      int err = GetLastError();
-      Print("SocketSend failed: ", err);
-      g_connected = false;
-      return false;
+      int remaining = len - totalSent;
+      uchar chunk[];
+      ArrayResize(chunk, remaining);
+      for(int i = 0; i < remaining; i++)
+         chunk[i] = data[totalSent + i];
+
+      ResetLastError();
+      int sent = SocketSend(g_socket, chunk, remaining);
+      if(sent <= 0)
+      {
+         int err = GetLastError();
+         Print("SocketSend failed: ", err);
+         MarkDisconnected("Socket send failed");
+         return false;
+      }
+
+      totalSent += sent;
    }
    
    if(InpDebugMode)
@@ -270,7 +334,7 @@ void SendHandshake()
    string json = "{";
    json += "\"type\":\"handshake\",";
    json += "\"platform\":\"MT5\",";
-   json += "\"version\":\"2.0\",";
+   json += "\"version\":\"3.0\",";
    json += "\"account\":\"" + IntegerToString(AccountInfoInteger(ACCOUNT_LOGIN)) + "\",";
    json += "\"broker\":\"" + EscapeJson(AccountInfoString(ACCOUNT_COMPANY)) + "\",";
    json += "\"symbols\":[" + SymbolsToJson() + "]";
@@ -302,21 +366,30 @@ void SendTickData()
    for(int i = 0; i < g_symbolCount; i++)
    {
       MqlTick tick;
-      if(!SymbolInfoTick(g_symbols[i], tick))
+      if(!SymbolInfoTick(g_resolvedSymbols[i], tick))
          continue;
       
       string json = "{";
       json += "\"type\":\"tick\",";
       json += "\"symbol\":\"" + g_symbols[i] + "\",";
-      json += "\"bid\":\"" + DoubleToString(tick.bid, _Digits) + "\",";
-      json += "\"ask\":\"" + DoubleToString(tick.ask, _Digits) + "\",";
-      json += "\"last\":\"" + DoubleToString(tick.last, _Digits) + "\",";
+      json += "\"resolved_symbol\":\"" + g_resolvedSymbols[i] + "\",";
+      int digits = SymbolDigits(g_resolvedSymbols[i]);
+      json += "\"bid\":\"" + DoubleToString(tick.bid, digits) + "\",";
+      json += "\"ask\":\"" + DoubleToString(tick.ask, digits) + "\",";
+      json += "\"last\":\"" + DoubleToString(tick.last, digits) + "\",";
       json += "\"volume\":\"" + IntegerToString(tick.volume) + "\",";
       json += "\"time\":\"" + IntegerToString(tick.time) + "\",";
       json += "\"time_msc\":\"" + IntegerToString(tick.time_msc) + "\",";
       json += "\"flags\":\"" + IntegerToString(tick.flags) + "\"";
       json += "}\n";
-      
+
+      string payloadKey = DoubleToString(tick.bid, digits) + "|" +
+                          DoubleToString(tick.ask, digits) + "|" +
+                          IntegerToString(tick.time_msc);
+      if(payloadKey == g_lastTickPayload[i])
+         continue;
+
+      g_lastTickPayload[i] = payloadKey;
       SendString(json);
    }
 }
@@ -328,13 +401,13 @@ void CheckNewBars()
 {
    for(int i = 0; i < g_symbolCount; i++)
    {
-      datetime currentBarTime = iTime(g_symbols[i], PERIOD_CURRENT, 0);
+      datetime currentBarTime = iTime(g_resolvedSymbols[i], PERIOD_CURRENT, 0);
       
       if(currentBarTime != g_lastBarTime[i])
       {
          if(g_lastBarTime[i] != 0) // Skip first run
          {
-            SendBarData(g_symbols[i], 1); // Send completed bar
+            SendBarData(i, 1); // Send completed bar
          }
          g_lastBarTime[i] = currentBarTime;
          g_newBar[i] = true;
@@ -342,7 +415,7 @@ void CheckNewBars()
       else if(g_newBar[i])
       {
          // Send forming bar updates
-         SendBarData(g_symbols[i], 0);
+         SendBarData(i, 0);
       }
    }
 }
@@ -350,74 +423,64 @@ void CheckNewBars()
 //+------------------------------------------------------------------+
 //| Send bar (OHLCV) data                                              |
 //+------------------------------------------------------------------+
-void SendBarData(string symbol, int index)
+void SendBarData(int symbolIndex, int index)
 {
+   if(symbolIndex < 0 || symbolIndex >= g_symbolCount)
+      return;
+
+   string requestedSymbol = g_symbols[symbolIndex];
+   string brokerSymbol = ResolveBrokerSymbol(requestedSymbol);
+   if(StringLen(brokerSymbol) == 0)
+      return;
+
    MqlRates rates[];
-   int copied = CopyRates(symbol, PERIOD_CURRENT, index, 1, rates);
-   if(copied < 1) return;
-   
+   int copied = CopyRates(brokerSymbol, PERIOD_CURRENT, index, 1, rates);
+   if(copied < 1)
+      return;
+
+   int digits = SymbolDigits(brokerSymbol);
+
    string json = "{";
    json += "\"type\":\"bar\",";
-   json += "\"symbol\":\"" + symbol + "\",";
-   json += "\"timeframe\":\"" + TimeframeToString(PERIOD_CURRENT) + "\",";
+   json += "\"symbol\":\"" + requestedSymbol + "\",";
+   json += "\"resolved_symbol\":\"" + brokerSymbol + "\",";
+   json += "\"timeframe\":\"" + TimeframeToString(CurrentChartTimeframe()) + "\",";
    json += "\"time\":\"" + IntegerToString(rates[0].time) + "\",";
-   json += "\"open\":\"" + DoubleToString(rates[0].open, _Digits) + "\",";
-   json += "\"high\":\"" + DoubleToString(rates[0].high, _Digits) + "\",";
-   json += "\"low\":\"" + DoubleToString(rates[0].low, _Digits) + "\",";
-   json += "\"close\":\"" + DoubleToString(rates[0].close, _Digits) + "\",";
+   json += "\"open\":\"" + DoubleToString(rates[0].open, digits) + "\",";
+   json += "\"high\":\"" + DoubleToString(rates[0].high, digits) + "\",";
+   json += "\"low\":\"" + DoubleToString(rates[0].low, digits) + "\",";
+   json += "\"close\":\"" + DoubleToString(rates[0].close, digits) + "\",";
    json += "\"tick_volume\":\"" + IntegerToString(rates[0].tick_volume) + "\",";
    json += "\"real_volume\":\"" + IntegerToString(rates[0].real_volume) + "\",";
    json += "\"spread\":\"" + IntegerToString(rates[0].spread) + "\",";
    json += "\"isForming\":" + ((index == 0) ? "true" : "false");
    json += "}\n";
-   
+
+   string payloadKey = IntegerToString(rates[0].time) + "|" +
+                       DoubleToString(rates[0].open, digits) + "|" +
+                       DoubleToString(rates[0].high, digits) + "|" +
+                       DoubleToString(rates[0].low, digits) + "|" +
+                       DoubleToString(rates[0].close, digits) + "|" +
+                       IntegerToString(rates[0].tick_volume) + "|" +
+                       IntegerToString(index);
+   if(payloadKey == g_lastBarPayload[symbolIndex])
+      return;
+
+   g_lastBarPayload[symbolIndex] = payloadKey;
    SendString(json);
 }
 
 //+------------------------------------------------------------------+
 //| Send historical data                                               |
 //+------------------------------------------------------------------+
-void SendHistory(string symbol)
+void SendHistory(string requestedSymbol)
 {
-   MqlRates rates[];
-   int copied = CopyRates(symbol, PERIOD_CURRENT, 1, InpHistoryBars, rates);
-   if(copied < 1)
-   {
-      Print("Failed to copy history for ", symbol);
-      return;
-   }
-   
-   Print("Sending ", copied, " historical bars for ", symbol);
-   
-   for(int i = copied - 1; i >= 0; i--)
-   {
-      string json = "{";
-      json += "\"type\":\"history\",";
-      json += "\"symbol\":\"" + symbol + "\",";
-      json += "\"timeframe\":\"" + TimeframeToString(PERIOD_CURRENT) + "\",";
-      json += "\"time\":\"" + IntegerToString(rates[i].time) + "\",";
-      json += "\"open\":\"" + DoubleToString(rates[i].open, _Digits) + "\",";
-      json += "\"high\":\"" + DoubleToString(rates[i].high, _Digits) + "\",";
-      json += "\"low\":\"" + DoubleToString(rates[i].low, _Digits) + "\",";
-      json += "\"close\":\"" + DoubleToString(rates[i].close, _Digits) + "\",";
-      json += "\"tick_volume\":\"" + IntegerToString(rates[i].tick_volume) + "\",";
-      json += "\"real_volume\":\"" + IntegerToString(rates[i].real_volume) + "\",";
-      json += "\"spread\":\"" + IntegerToString(rates[i].spread) + "\",";
-      json += "\"index\":\"" + IntegerToString(copied - 1 - i) + "\"";
-      json += "}\n";
-      
-      SendString(json);
-   }
-   
-   // Send history complete signal
-   string complete = "{";
-   complete += "\"type\":\"history_complete\",";
-   complete += "\"symbol\":\"" + symbol + "\",";
-   complete += "\"bars\":\"" + IntegerToString(copied) + "\"";
-   complete += "}\n";
-   
-   SendString(complete);
-   Print("History sent for ", symbol);
+   SendHistoryBars(
+      requestedSymbol,
+      PERIOD_CURRENT,
+      InpHistoryBars,
+      ""
+   );
 }
 
 //+------------------------------------------------------------------+
@@ -509,16 +572,21 @@ void ProcessIncomingCommands()
    if(g_socket == INVALID_HANDLE || !g_connected)
       return;
    
-   uchar buffer[];  // <-- was char[], change to uchar[]
-   int received = SocketRead(g_socket, buffer, 4096, InpSocketTimeout);
+   ResetLastError();
+   uint readable = SocketIsReadable(g_socket);
+   if(readable <= 1)
+      return;
+
+   uchar buffer[];
+   int received = SocketRead(g_socket, buffer, MathMin(readable, 4096), MathMax(1, InpSocketReadTimeout));
    
    if(received <= 0)
    {
       int err = GetLastError();
-      if(err != 0 && err != 5040) // 5040 = no data available
+      if(err != 0 && err != 5040)
       {
          Print("SocketRead error: ", err);
-         g_connected = false;
+         MarkDisconnected("Socket read failed");
       }
       return;
    }
@@ -597,7 +665,13 @@ void ProcessCommand(string jsonStr)
 //+------------------------------------------------------------------+
 void HandlePlaceOrder(string jsonStr)
 {
-   string symbol = JsonGetString(jsonStr, "symbol");
+   string requestedSymbol = JsonGetString(jsonStr, "symbol");
+   string symbol = ResolveBrokerSymbol(requestedSymbol);
+   if(StringLen(symbol) == 0)
+   {
+      SendError("place_order", "Broker symbol could not be resolved: " + requestedSymbol);
+      return;
+   }
    string typeStr = JsonGetString(jsonStr, "order_type");
    double volume = StringToDouble(JsonGetString(jsonStr, "volume"));
    double price = StringToDouble(JsonGetString(jsonStr, "price"));
@@ -650,10 +724,13 @@ void HandlePlaceOrder(string jsonStr)
    resp += "\"request_type\":\"place_order\",";
    resp += "\"success\":true,";
    resp += "\"ticket\":\"" + IntegerToString(result.order) + "\",";
+   resp += "\"symbol\":\"" + EscapeJson(requestedSymbol) + "\",";
+   resp += "\"resolved_symbol\":\"" + EscapeJson(symbol) + "\",";
    resp += "\"volume\":\"" + DoubleToString(result.volume, 2) + "\",";
-   resp += "\"price\":\"" + DoubleToString(result.price, _Digits) + "\",";
-   resp += "\"bid\":\"" + DoubleToString(result.bid, _Digits) + "\",";
-   resp += "\"ask\":\"" + DoubleToString(result.ask, _Digits) + "\",";
+   int orderDigits = SymbolDigits(symbol);
+   resp += "\"price\":\"" + DoubleToString(result.price, orderDigits) + "\",";
+   resp += "\"bid\":\"" + DoubleToString(result.bid, orderDigits) + "\",";
+   resp += "\"ask\":\"" + DoubleToString(result.ask, orderDigits) + "\",";
    resp += "\"comment\":\"" + EscapeJson(result.comment) + "\"";
    resp += "}\n";
    
@@ -802,55 +879,132 @@ void HandleCancelOrder(string jsonStr)
 //+------------------------------------------------------------------+
 void HandleGetHistory(string jsonStr)
 {
-   string symbol = JsonGetString(jsonStr, "symbol");
-   string tfStr = JsonGetString(jsonStr, "timeframe");
+   string requestedSymbol = JsonGetString(jsonStr, "symbol");
+   string timeframeText = JsonGetString(jsonStr, "timeframe");
+   string requestId = JsonGetString(jsonStr, "request_id");
    int count = (int)StringToInteger(JsonGetString(jsonStr, "count"));
-   if(count <= 0) count = 100;
-   
-   ENUM_TIMEFRAMES tf = StringToTimeframe(tfStr);
-   
-   SendHistoryBars(symbol, tf, count);
+
+   if(count <= 0)
+      count = 10;
+   count = MathMin(count, 100);
+
+   ENUM_TIMEFRAMES timeframe;
+   if(!TryStringToTimeframe(timeframeText, timeframe))
+   {
+      SendHistoryError(
+         requestedSymbol,
+         timeframeText,
+         requestId,
+         "Unsupported timeframe"
+      );
+      return;
+   }
+
+   SendHistoryBars(requestedSymbol, timeframe, count, requestId);
 }
 
 //+------------------------------------------------------------------+
-//| Send historical bars on request                                    |
+//| Send historical bars on request                                  |
 //+------------------------------------------------------------------+
-void SendHistoryBars(string symbol, ENUM_TIMEFRAMES tf, int count)
+void SendHistoryBars(
+   string requestedSymbol,
+   ENUM_TIMEFRAMES timeframe,
+   int count,
+   string requestId
+)
 {
-   MqlRates rates[];
-   int copied = CopyRates(symbol, tf, 0, count, rates);
-   if(copied < 1)
+   string brokerSymbol = ResolveBrokerSymbol(requestedSymbol);
+   if(StringLen(brokerSymbol) == 0)
    {
-      SendError("get_history", "Failed to copy rates for " + symbol);
+      SendHistoryError(
+         requestedSymbol,
+         TimeframeToString(timeframe),
+         requestId,
+         "Broker symbol could not be resolved"
+      );
       return;
    }
-   
+
+   if(!SymbolSelect(brokerSymbol, true))
+   {
+      SendHistoryError(
+         requestedSymbol,
+         TimeframeToString(timeframe),
+         requestId,
+         "SymbolSelect failed for " + brokerSymbol
+      );
+      return;
+   }
+
+   MqlRates rates[];
+   ArraySetAsSeries(rates, true);
+
+   ResetLastError();
+   int copied = CopyRates(brokerSymbol, timeframe, 0, count, rates);
+   if(copied < 1)
+   {
+      SendHistoryError(
+         requestedSymbol,
+         TimeframeToString(timeframe),
+         requestId,
+         "CopyRates failed: " + IntegerToString(GetLastError())
+      );
+      return;
+   }
+
+   int digits = SymbolDigits(brokerSymbol);
+
+   // CopyRates with a series array is newest-first; send oldest-first.
    for(int i = copied - 1; i >= 0; i--)
    {
       string json = "{";
       json += "\"type\":\"history_response\",";
-      json += "\"symbol\":\"" + symbol + "\",";
-      json += "\"timeframe\":\"" + TimeframeToString(tf) + "\",";
+      json += "\"request_id\":\"" + EscapeJson(requestId) + "\",";
+      json += "\"symbol\":\"" + EscapeJson(requestedSymbol) + "\",";
+      json += "\"resolved_symbol\":\"" + EscapeJson(brokerSymbol) + "\",";
+      json += "\"timeframe\":\"" + TimeframeToString(timeframe) + "\",";
       json += "\"time\":\"" + IntegerToString(rates[i].time) + "\",";
-      json += "\"open\":\"" + DoubleToString(rates[i].open, _Digits) + "\",";
-      json += "\"high\":\"" + DoubleToString(rates[i].high, _Digits) + "\",";
-      json += "\"low\":\"" + DoubleToString(rates[i].low, _Digits) + "\",";
-      json += "\"close\":\"" + DoubleToString(rates[i].close, _Digits) + "\",";
+      json += "\"open\":\"" + DoubleToString(rates[i].open, digits) + "\",";
+      json += "\"high\":\"" + DoubleToString(rates[i].high, digits) + "\",";
+      json += "\"low\":\"" + DoubleToString(rates[i].low, digits) + "\",";
+      json += "\"close\":\"" + DoubleToString(rates[i].close, digits) + "\",";
       json += "\"tick_volume\":\"" + IntegerToString(rates[i].tick_volume) + "\",";
-      json += "\"index\":\"" + IntegerToString(copied - 1 - i) + "\"";
+      json += "\"real_volume\":\"" + IntegerToString(rates[i].real_volume) + "\",";
+      json += "\"spread\":\"" + IntegerToString(rates[i].spread) + "\",";
+      json += "\"isForming\":" + ((i == 0) ? "true" : "false");
       json += "}\n";
-      
-      SendString(json);
+
+      if(!SendString(json))
+         return;
    }
-   
+
    string complete = "{";
    complete += "\"type\":\"history_response_complete\",";
-   complete += "\"symbol\":\"" + symbol + "\",";
-   complete += "\"timeframe\":\"" + TimeframeToString(tf) + "\",";
+   complete += "\"request_id\":\"" + EscapeJson(requestId) + "\",";
+   complete += "\"symbol\":\"" + EscapeJson(requestedSymbol) + "\",";
+   complete += "\"resolved_symbol\":\"" + EscapeJson(brokerSymbol) + "\",";
+   complete += "\"timeframe\":\"" + TimeframeToString(timeframe) + "\",";
    complete += "\"count\":\"" + IntegerToString(copied) + "\"";
    complete += "}\n";
-   
+
    SendString(complete);
+}
+
+void SendHistoryError(
+   string requestedSymbol,
+   string timeframe,
+   string requestId,
+   string message
+)
+{
+   string json = "{";
+   json += "\"type\":\"history_response_error\",";
+   json += "\"request_id\":\"" + EscapeJson(requestId) + "\",";
+   json += "\"symbol\":\"" + EscapeJson(requestedSymbol) + "\",";
+   json += "\"timeframe\":\"" + EscapeJson(timeframe) + "\",";
+   json += "\"error\":\"" + EscapeJson(message) + "\"";
+   json += "}\n";
+   SendString(json);
 }
 
 //+------------------------------------------------------------------+
@@ -885,6 +1039,115 @@ void SendError(string requestType, string errorMsg)
 }
 
 //+------------------------------------------------------------------+
+//| Broker symbol resolution                                           |
+//+------------------------------------------------------------------+
+string ResolveAlias(string canonical)
+{
+   string pairs[];
+   ushort comma = StringGetCharacter(",", 0);
+   int pairCount = StringSplit(InpSymbolAliases, comma, pairs);
+
+   for(int i = 0; i < pairCount; i++)
+   {
+      string pair = pairs[i];
+      StringTrimLeft(pair);
+      StringTrimRight(pair);
+
+      int equalPos = StringFind(pair, "=");
+      if(equalPos <= 0)
+         continue;
+
+      string left = StringSubstr(pair, 0, equalPos);
+      string right = StringSubstr(pair, equalPos + 1);
+      StringTrimLeft(left);
+      StringTrimRight(left);
+      StringTrimLeft(right);
+      StringTrimRight(right);
+
+      if(StringCompare(left, canonical, false) == 0)
+         return right;
+   }
+
+   return "";
+}
+
+bool IsStrictSuffixCandidate(string canonical, string candidate)
+{
+   string base = canonical;
+   string name = candidate;
+   StringToUpper(base);
+   StringToUpper(name);
+
+   if(name == base)
+      return true;
+
+   if(StringFind(name, base) != 0)
+      return false;
+
+   string suffix = StringSubstr(name, StringLen(base));
+   if(StringLen(suffix) == 0)
+      return true;
+
+   ushort first = StringGetCharacter(suffix, 0);
+   return (
+      first == '_' ||
+      first == '.' ||
+      first == '-' ||
+      (first >= '0' && first <= '9')
+   );
+}
+
+string ResolveBrokerSymbol(string canonical)
+{
+   if(StringLen(canonical) == 0)
+      return "";
+
+   string alias = ResolveAlias(canonical);
+   if(StringLen(alias) > 0)
+   {
+      if(SymbolSelect(alias, true))
+         return alias;
+
+      Print("Configured alias is unavailable: ", canonical, " -> ", alias);
+   }
+
+   if(SymbolSelect(canonical, true))
+      return canonical;
+
+   int total = SymbolsTotal(false);
+   string uniqueCandidate = "";
+
+   for(int i = 0; i < total; i++)
+   {
+      string candidate = SymbolName(i, false);
+      if(!IsStrictSuffixCandidate(canonical, candidate))
+         continue;
+
+      if(StringLen(uniqueCandidate) > 0 && uniqueCandidate != candidate)
+      {
+         Print("Ambiguous broker symbol for ", canonical,
+               ": ", uniqueCandidate, " and ", candidate);
+         return "";
+      }
+
+      uniqueCandidate = candidate;
+   }
+
+   if(StringLen(uniqueCandidate) > 0 && SymbolSelect(uniqueCandidate, true))
+      return uniqueCandidate;
+
+   return "";
+}
+
+int SymbolDigits(string symbol)
+{
+   long digits = 0;
+   if(SymbolInfoInteger(symbol, SYMBOL_DIGITS, digits))
+      return (int)digits;
+   return _Digits;
+}
+
+//+------------------------------------------------------------------+
 //| Convert symbols array to JSON array string                         |
 //+------------------------------------------------------------------+
 string SymbolsToJson()
@@ -892,8 +1155,13 @@ string SymbolsToJson()
    string result = "";
    for(int i = 0; i < g_symbolCount; i++)
    {
-      if(i > 0) result += ",";
-      result += "\"" + g_symbols[i] + "\"";
+      string symbol = g_resolvedSymbols[i];
+      if(StringLen(symbol) == 0)
+         continue;
+
+      if(StringLen(result) > 0)
+         result += ",";
+      result += "\"" + EscapeJson(symbol) + "\"";
    }
    return result;
 }
@@ -972,18 +1240,39 @@ string JsonGetString(string json, string key)
 //+------------------------------------------------------------------+
 //| String to timeframe conversion                                     |
 //+------------------------------------------------------------------+
+bool TryStringToTimeframe(string tf, ENUM_TIMEFRAMES &result)
+{
+   string value = tf;
+   StringToUpper(value);
+
+   if(value == "M1" || value == "1M") { result = PERIOD_M1; return true; }
+   if(value == "M5" || value == "5M") { result = PERIOD_M5; return true; }
+   if(value == "M15" || value == "15M") { result = PERIOD_M15; return true; }
+   if(value == "M30" || value == "30M") { result = PERIOD_M30; return true; }
+   if(value == "H1" || value == "1H") { result = PERIOD_H1; return true; }
+   if(value == "H4" || value == "4H") { result = PERIOD_H4; return true; }
+   if(value == "D1" || value == "1D") { result = PERIOD_D1; return true; }
+   if(value == "W1" || value == "1W") { result = PERIOD_W1; return true; }
+   if(value == "MN" || value == "MN1" || value == "1MN")
+   {
+      result = PERIOD_MN1;
+      return true;
+   }
+
+   return false;
+}
+
 ENUM_TIMEFRAMES StringToTimeframe(string tf)
 {
-   if(tf == "M1") return PERIOD_M1;
-   if(tf == "M5") return PERIOD_M5;
-   if(tf == "M15") return PERIOD_M15;
-   if(tf == "M30") return PERIOD_M30;
-   if(tf == "H1") return PERIOD_H1;
-   if(tf == "H4") return PERIOD_H4;
-   if(tf == "D1") return PERIOD_D1;
-   if(tf == "W1") return PERIOD_W1;
-   if(tf == "MN1") return PERIOD_MN1;
+   ENUM_TIMEFRAMES result;
+   if(TryStringToTimeframe(tf, result))
+      return result;
    return PERIOD_CURRENT;
+}
+
+ENUM_TIMEFRAMES CurrentChartTimeframe()
+{
+   return (ENUM_TIMEFRAMES)_Period;
 }
 
 //+------------------------------------------------------------------+

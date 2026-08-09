@@ -117,6 +117,20 @@ class MT5Bridge extends EventEmitter {
         this.emit('historyComplete', msg);
         break;
 
+      case 'history_response':
+        this.emit('historyResponse', msg);
+        break;
+
+      case 'history_response_complete':
+        console.log(`[MT5] History: ${msg.symbol} (${msg.count} bars)`);
+        this.emit('historyResponseComplete', msg);
+        break;
+
+      case 'history_response_error':
+        console.error('[MT5] History error:', msg.error);
+        this.emit('historyResponseError', msg);
+        break;
+
       case 'account':
         this.emit('account', msg);
         break;
@@ -222,6 +236,11 @@ if (isMain) {
     if (latestData.ticks.length > 100) latestData.ticks.shift();
   });
 
+  bridge.on('bar', (bar) => {
+    latestData.bars.push(bar);
+    if (latestData.bars.length > 100) latestData.bars.shift();
+  });
+
   bridge.on('account', (acc) => {
     latestData.account = acc;
   });
@@ -232,6 +251,18 @@ if (isMain) {
 
   bridge.on('historyComplete', (msg) => {
     resolveHistoryMessage(msg);
+  });
+
+  bridge.on('historyResponse', (msg) => {
+    appendHistoryResponseMessage(msg);
+  });
+
+  bridge.on('historyResponseComplete', (msg) => {
+    resolveHistoryResponseComplete(msg);
+  });
+
+  bridge.on('historyResponseError', (msg) => {
+    rejectHistoryResponse(msg);
   });
 
   // HTTP API server
@@ -268,8 +299,9 @@ if (isMain) {
     }
     else if (req.url === '/latest') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      const response = { ticks: latestData.ticks, account: latestData.account };
+      const response = { ticks: latestData.ticks, bars: latestData.bars, account: latestData.account };
       latestData.ticks = [];
+      latestData.bars = [];
       res.end(JSON.stringify(response));
     }
     else if (req.url === '/command' && req.method === 'POST') {
@@ -355,7 +387,13 @@ if (isMain) {
     }
 
     let timeout = null;
-    const entry = { symbol: request.symbol, timeframe: request.timeframe, count: request.count };
+    const entry = {
+      symbol: request.symbol,
+      timeframe: request.timeframe,
+      count: request.count,
+      requestId: makeHistoryRequestId(request),
+      candles: [],
+    };
     entry.promise = new Promise((resolve, reject) => {
       entry.resolvePromise = resolve;
       entry.rejectPromise = reject;
@@ -380,6 +418,7 @@ if (isMain) {
 
     const sent = bridge.sendToFirst({
       type: 'get_history',
+      request_id: entry.requestId,
       symbol: request.symbol,
       timeframe: request.timeframe,
       count: request.count,
@@ -396,6 +435,36 @@ if (isMain) {
     const entry = historyRequests.get(historyKey(symbol, timeframe));
     if (!entry) return;
     entry.resolve(extractHistoryCandles(msg));
+  }
+
+  function appendHistoryResponseMessage(msg) {
+    const entry = findHistoryEntry(msg);
+    if (!entry) return;
+    entry.candles.push(...extractHistoryCandles(msg));
+  }
+
+  function resolveHistoryResponseComplete(msg) {
+    const entry = findHistoryEntry(msg);
+    if (!entry) return;
+    entry.resolve(entry.candles);
+  }
+
+  function rejectHistoryResponse(msg) {
+    const entry = findHistoryEntry(msg);
+    if (!entry) return;
+    entry.reject(historyError('MT5_HISTORY_ERROR', msg.error || 'MT5 history request failed'));
+  }
+
+  function findHistoryEntry(msg) {
+    const requestId = String(msg.request_id || '');
+    for (const entry of historyRequests.values()) {
+      if (requestId && entry.requestId === requestId) return entry;
+    }
+
+    const symbol = String(msg.symbol || '').trim().toUpperCase();
+    const timeframe = normalizeHistoryTimeframe(msg.timeframe || msg.period);
+    if (!symbol || !timeframe) return null;
+    return historyRequests.get(historyKey(symbol, timeframe)) || null;
   }
 
   function extractHistoryCandles(msg) {
@@ -471,6 +540,10 @@ if (isMain) {
 
   function historyKey(symbol, timeframe) {
     return `${symbol}:${timeframe}`;
+  }
+
+  function makeHistoryRequestId(request) {
+    return `${historyKey(request.symbol, request.timeframe)}:${Date.now()}:${Math.random().toString(36).slice(2, 8)}`;
   }
 
   function toHistoryNumber(value) {
